@@ -56,6 +56,56 @@ while [ "$COUNT" -lt 60 ]; do
             }
         ' /proc/pressure/cpu /proc/pressure/io /proc/pressure/memory >> "$RUN/psi.tsv" 2>/dev/null
     fi
+    if [ -r /proc/stat ] && [ -r /proc/meminfo ]; then
+        {
+            cat /proc/stat 2>/dev/null
+            echo "===MEM==="
+            cat /proc/meminfo 2>/dev/null
+            echo "===PS==="
+            cat /proc/[0-9]*/stat 2>/dev/null
+        } | awk -v s="$COUNT" -v u="$UPTIME" '
+            BEGIN { sec = "stat" }
+            $0 == "===MEM===" { sec = "mem"; next }
+            $0 == "===PS===" {
+                printf "# sample=%s uptime=%s tot=%.0f idle=%.0f iow=%.0f mem_avail_mb=%d mem_tot_mb=%d\n",
+                    s, u, tot, idle, iow, mem_avail, mem_tot
+                sec = "ps"
+                next
+            }
+            sec == "stat" && $1 == "cpu" {
+                tot = $2 + $3 + $4 + $5 + $6 + $7 + $8 + $9
+                idle = $5 + $6
+                iow = $6
+                next
+            }
+            sec == "mem" && $1 == "MemTotal:" { mem_tot = int($2 / 1024); next }
+            sec == "mem" && $1 == "MemAvailable:" { mem_avail = int($2 / 1024); next }
+            sec == "ps" {
+                rp = 0
+                for (i = length($0); i >= 1; i--) {
+                    if (substr($0, i, 1) == ")") { rp = i; break }
+                }
+                lp = index($0, "(")
+                if (lp > 1 && rp > lp) {
+                    pid = substr($0, 1, lp - 2)
+                    gsub(/[[:space:]]/, "", pid)
+                    comm = substr($0, lp + 1, rp - lp - 1)
+                    gsub(/[[:space:]]+/, "_", comm)
+                    if (comm == "") comm = "?"
+                    rest = substr($0, rp + 2)
+                    n = split(rest, a, " ")
+                    if (n >= 13 && pid ~ /^[0-9]+$/ && a[2] ~ /^[0-9]+$/ && a[12] ~ /^[0-9]+$/ && a[13] ~ /^[0-9]+$/) {
+                        st = a[1]
+                        ppid = a[2]
+                        ticks = a[12] + a[13]
+                        if (ticks > 0 || st == "R" || st == "D") {
+                            printf "%s\t%s\t%s\t%s\t%.0f\n", pid, ppid, comm, st, ticks
+                        }
+                    }
+                }
+            }
+        ' >> "$RUN/proc.tsv" 2>/dev/null
+    fi
     COUNT=$((COUNT + 1))
     if [ "$(getprop sys.boot_completed)" = 1 ]; then
         COMPLETE_COUNT=$((COMPLETE_COUNT + 1))
@@ -149,4 +199,5 @@ done
     echo "dmesg_exit=$(cat "$RUN/dmesg-exit.txt" 2>/dev/null)"
     echo "init_events_count=$(wc -l < "$RUN/init-events.tsv" | tr -d ' ')"
     echo "psi_samples=$([ -f "$RUN/psi.tsv" ] && wc -l < "$RUN/psi.tsv" | tr -d ' ' || echo 0)"
+    echo "proc_samples=$([ -f "$RUN/proc.tsv" ] && grep -c '^# sample=' "$RUN/proc.tsv" || echo 0)"
 } >> "$RUN/metadata.txt"

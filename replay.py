@@ -1,4 +1,4 @@
-"""Replay recorded Android startup snapshots and early init events as a terminal panel."""
+"""Replay recorded Android startup snapshots, early init events, and PSI/proc stats."""
 import argparse
 from collections import deque
 import math
@@ -7,7 +7,15 @@ from pathlib import Path
 import sys
 import time
 
-from analyze_probe import compute_psi_intervals, read_boot_events, read_init_events, read_psi_samples, read_samples
+from analyze_probe import (
+    compute_proc_hotspots,
+    compute_psi_intervals,
+    read_boot_events,
+    read_init_events,
+    read_proc_samples,
+    read_psi_samples,
+    read_samples,
+)
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -45,7 +53,8 @@ def _format_bootloader_line(bl):
     return 'Bootloader (raw)  ' + '  '.join(tokens[:5])
 
 
-def render(subtitle, uptime, snapshot, recent, changed_other=(), init_phase=None, psi_row=None, bootloader=None):
+def render(subtitle, uptime, snapshot, recent, changed_other=(), init_phase=None,
+           psi_row=None, proc_row=None, bootloader=None):
     services = snapshot['services']
     yield f'BootScope  /  recorded boot{uptime:>8.2f} s'
     phase_note = f'  ·  phase: {init_phase}' if init_phase else ''
@@ -73,6 +82,16 @@ def render(subtitle, uptime, snapshot, recent, changed_other=(), init_phase=None
             f"PSI ({psi_row['mode']})  cpu={psi_row['cpu_some_pct']:.1f}%  "
             f"io={psi_row['io_some_pct']:.1f}%  mem={psi_row['mem_some_pct']:.1f}%"
         )
+    if proc_row:
+        if proc_row['mode'] == 'delta':
+            top_str = ', '.join(f"{t['comm']}({t['cpu_pct']:.0f}%)" for t in proc_row['top'][:2])
+            top_part = f'  top={top_str}' if top_str else ''
+            yield (
+                f"SYS  cpu={proc_row['cpu_busy_pct']:.1f}%  iow={proc_row['iowait_pct']:.1f}%  "
+                f"mem={proc_row['mem_avail_mb']}/{proc_row['mem_tot_mb']}MB{top_part}"
+            )
+        else:
+            yield f"SYS  mem={proc_row['mem_avail_mb']}/{proc_row['mem_tot_mb']}MB"
     completed = snapshot['boot_completed_raw'] or '?'
     anim_exit = snapshot['bootanim_exit_raw'] or '?'
     yield f'sys.boot_completed={completed}  ·  service.bootanim.exit={anim_exit}'
@@ -132,10 +151,11 @@ def _pre_snapshot_frames(init_events, first_sample_uptime, recent, bootloader=No
     return emitted, phase
 
 
-def frames(samples, init_events=None, psi_intervals=None):
+def frames(samples, init_events=None, psi_intervals=None, proc_intervals=None):
     recent = deque(maxlen=6)
     bootloader = samples[0][1].get('bootloader_boottime') if samples else None
     psi_by_sample = {row['sample']: row for row in (psi_intervals or ())}
+    proc_by_sample = {row['sample']: row for row in (proc_intervals or ())}
     init_phase = None
     if init_events and samples:
         pre_frames, init_phase = _pre_snapshot_frames(
@@ -177,6 +197,7 @@ def frames(samples, init_events=None, psi_intervals=None):
                 changed_other,
                 init_phase=init_phase,
                 psi_row=psi_by_sample.get(header[0]),
+                proc_row=proc_by_sample.get(header[0]),
                 bootloader=bootloader,
             )
         )
@@ -211,7 +232,10 @@ def main():
         samples = read_samples(args.samples)
         init_events = read_init_events(args.samples.with_name('init-events.tsv'))
         psi_intervals = compute_psi_intervals(read_psi_samples(args.samples.with_name('psi.tsv')))
-        playback = list(frames(samples, init_events=init_events, psi_intervals=psi_intervals))
+        proc_intervals, _, _ = compute_proc_hotspots(read_proc_samples(args.samples.with_name('proc.tsv')))
+        playback = list(frames(
+            samples, init_events=init_events, psi_intervals=psi_intervals, proc_intervals=proc_intervals
+        ))
         events = read_boot_events(args.samples.with_name('boot-events.tsv'))
     except (OSError, ValueError) as error:
         parser.error(str(error))

@@ -12,6 +12,7 @@ import bootscope
 import build_module
 import package_utils
 import replay
+import report_utils
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -155,6 +156,33 @@ class BootScopeParsingTests(unittest.TestCase):
         self.assertAlmostEqual(intervals[1]['io_some_pct'], 50.0)
         self.assertAlmostEqual(intervals[1]['io_full_pct'], 10.0)
 
+    def test_read_proc_samples_and_hotspots(self):
+        proc_text = '\n'.join([
+            '# sample=0 uptime=12.00 tot=10000 idle=8000 iow=200 mem_avail_mb=5000 mem_tot_mb=11468',
+            '100\t1\tsystem_server\tS\t400',
+            '200\t1\tsurfaceflinger\tS\t200',
+            '# sample=1 uptime=13.00 tot=11000 idle=8400 iow=250 mem_avail_mb=4700 mem_tot_mb=11468',
+            '100\t1\tsystem_server\tR\t650',
+            '200\t1\tsurfaceflinger\tS\t250',
+            '350\t100\tdex2oat64\tD\t150',
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv = Path(tmp) / 'proc.tsv'
+            tsv.write_text(proc_text, encoding='utf-8')
+            samples = analyze_probe.read_proc_samples(tsv)
+        self.assertEqual(len(samples), 2)
+        intervals, top_overall, d_events = analyze_probe.compute_proc_hotspots(samples)
+        self.assertEqual(intervals[0]['mode'], 'baseline')
+        self.assertEqual(intervals[1]['mode'], 'delta')
+        self.assertAlmostEqual(intervals[1]['cpu_busy_pct'], 60.0)
+        self.assertAlmostEqual(intervals[1]['iowait_pct'], 5.0)
+        self.assertEqual(intervals[1]['d_procs'], ['dex2oat64'])
+        self.assertEqual(top_overall[0]['comm'], 'system_server')
+        self.assertEqual(top_overall[0]['total_ticks'], 250)
+        self.assertEqual(top_overall[1]['comm'], 'dex2oat64')
+        self.assertEqual(top_overall[1]['total_ticks'], 150)
+        self.assertEqual(d_events, [(13.0, 'dex2oat64')])
+
 
 class ReplayTests(unittest.TestCase):
     def test_replay_tracks_non_core_service_changes(self):
@@ -228,6 +256,41 @@ class ReplayTests(unittest.TestCase):
         self.assertIn('Bootloader (raw)', playback[0][1])
         self.assertIn('2BLE=673', playback[0][1])
         self.assertIn('PSI (delta)  cpu=18.5%  io=42.0%  mem=0.0%', playback[0][1])
+
+    def test_ab_compare_and_html_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for label, boost in (('runA', 0), ('runB', 300)):
+                d = tmp_path / label
+                d.mkdir()
+                (d / 'metadata.txt').write_text(
+                    f'boot_id={label}\nandroid_version=17\nsdk=37\n',
+                    encoding='utf-8',
+                )
+                (d / 'samples.txt').write_text(
+                    '--- sample=0 uptime=12.00 ---\n'
+                    '[ro.boot.boottime]: [2BLE:600,AVB:120]\n'
+                    '[init.svc.bootanim]: [running]\n'
+                    '[ro.boottime.bootanim]: [2200000000]\n'
+                    '[sys.boot_completed]: [1]\n',
+                    encoding='utf-8',
+                )
+                (d / 'boot-events.tsv').write_text(
+                    f'boot_progress_start\t{10900 + boost}\n'
+                    f'boot_progress_enable_screen\t{20000 + boost}\n',
+                    encoding='utf-8',
+                )
+            run_a = report_utils.load_boot_run(tmp_path / 'runA' / 'samples.txt')
+            run_b = report_utils.load_boot_run(tmp_path / 'runB' / 'samples.txt')
+            comp = report_utils.compare_runs(run_a, run_b)
+            enable_row = next(r for r in comp['milestones'] if r['name'] == 'events:boot_progress_enable_screen')
+            self.assertEqual(enable_row['delta_ms'], 300.0)
+            text = report_utils.format_comparison_text(run_a, run_b)
+            self.assertIn('+300.0 ms', text)
+            html_out = report_utils.render_html_report(run_a, run_b)
+            self.assertIn('<!DOCTYPE html>', html_out)
+            self.assertIn('boot_progress_enable_screen', html_out)
+            self.assertIn('A / B 启动对比', html_out)
 
 
 class PackagingAndModuleTests(unittest.TestCase):
@@ -317,6 +380,7 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('.probe.lock', probe_sh)
         self.assertIn('init-events.tsv', probe_sh)
         self.assertIn('psi.tsv', probe_sh)
+        self.assertIn('proc.tsv', probe_sh)
         self.assertIn('ro\\.boot\\.boottime', probe_sh)
         self.assertIn('dmesg', probe_sh)
         self.assertIn('.display.lock', display_sh)

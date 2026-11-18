@@ -26,14 +26,14 @@ adb -s <设备序列号> shell "su -c 'ksud module uninstall bootscope_probe; ks
 
 `module/service.sh` 非阻塞地分别拉起两个独立后台任务，彼此互不影响：
 
-1. **采集探针（`probe.sh`）**：每轮采样 init 服务状态、首次启动时间、`ro.boottime.init.*` 阶段耗时、`ro.boot.boottime*` Bootloader 指标（如设备提供）、内核 PSI 压力 counters（`/proc/pressure/{cpu,io,memory}` 写入 `psi.tsv`）及开机动画和启动完成属性，最多 60 次；连续 3 次检测到 `sys.boot_completed=1` 后，限时读取当前 `events` 环形缓冲（仅保存允许的框架启动事件标签与毫秒数值）以及 `dmesg` 中的脱敏 `init:` 阶段/服务启停事件（`init-events.tsv`），补齐 `0s` 到 `service.sh` 拉起前的早期启动过程。快照记录观测时刻，事件字段使用各写入方定义的时钟。
+1. **采集探针（`probe.sh`）**：每轮采样 init 服务状态、首次启动时间、`ro.boottime.init.*` 阶段耗时、`ro.boot.boottime*` Bootloader 指标（如设备提供）、内核 PSI 压力（`psi.tsv`）、整机 CPU/内存及活跃进程 CPU ticks 快照（`/proc/stat` + `/proc/meminfo` + `/proc/[pid]/stat` 写入 `proc.tsv`）及开机动画和启动完成属性，最多 60 次；连续 3 次检测到 `sys.boot_completed=1` 后，限时读取当前 `events` 环形缓冲（仅保存允许的框架启动事件标签与毫秒数值）以及 `dmesg` 中的脱敏 `init:` 阶段/服务启停事件（`init-events.tsv`），补齐 `0s` 到 `service.sh` 拉起前的早期启动过程。快照记录观测时刻，事件字段使用各写入方定义的时钟。
 2. **开机显示（`bootscope_early` 原生早期探针 + `display.sh` 回退）**：
    - **早期原生路径（KernelSU + `arm64-v8a` 默认）**：仅在 KernelSU 环境且 `ro.product.cpu.abi=arm64-v8a` 时，安装与启动脚本才将静态链接 C++ 运行库的原生二进制 `bootscope_early` 同步至 `/metadata/vold/ksu/bootscope_early`，并通过 KernelSU 的 `initrc/bootscope.rc` 在 `on late-fs`（约 2.3 秒）即刻拉起，无需等待 `/data` 解密、`derive_classpath` 或 ART 启动即可渲染到 SurfaceFlinger；自动跟踪分辨率、旋转方向与刷新率切换，实时展示 10 段早期/框架启动进度、内核 PSI（CPU/IO/MEM）阻塞占比、Bootloader 阶段指标及关键服务状态跃迁。
    - **回退与多框架兼容**：在 Magisk / APatch、非 `arm64-v8a` 设备，或 `bootscope_early` 未能成功提交首帧时，`display.sh` 会自动保存失败诊断（如有）并回退到 `app_process`（`DisplayProbe.java`，需 Android 13 / API ≥ 33；低版本记录 `mode=unsupported_sdk` 后安全退出）。
    - 如需仅关闭开机显示而保留数据采集，创建 `/data/adb/bootscope/disable_display`（或模块目录下的 `disable_display`）即可，重启后自动跳过显示探针。
 
 每次开机的输出统一保存在设备 `/data/adb/bootscope/<boot-id>/`（目录权限 0700，文件默认 0600），通过独立的 `.probe.lock` / `.display.lock` 防止同一开机周期重复运行：
-- 采集结果：`metadata.txt`、`samples.txt`、`boot-events.tsv`、`init-events.tsv`、`psi.tsv`、`logcat-exit.txt`、`logcat-error.txt`、`dmesg-exit.txt`、`dmesg-error.txt`
+- 采集结果：`metadata.txt`、`samples.txt`、`boot-events.tsv`、`init-events.tsv`、`psi.tsv`、`proc.tsv`、`logcat-exit.txt`、`logcat-error.txt`、`dmesg-exit.txt`、`dmesg-error.txt`
 - 显示诊断：`display-status.txt`、`display-renderer.txt`、`display-compositor.txt`
 
 日志和属性可能包含敏感的系统信息；不会自动上传，也不会自动删除旧记录。在目标设备确认 `ksud module --help` 支持后，可使用 `ksud module disable bootscope` 禁用模块，重启后验证其不再运行。不要将不同 KernelSU 分支的恢复行为视为相同；安装和重启前确认设备的实际恢复方式。
@@ -44,6 +44,8 @@ adb -s <设备序列号> shell "su -c 'ksud module uninstall bootscope_probe; ks
 
 ```powershell
 python .\analyze_probe.py .\results\pixel-probe-v02\samples.txt
+python .\analyze_probe.py .\results\bootA\samples.txt --compare .\results\bootB\samples.txt
+python .\analyze_probe.py .\results\bootA\samples.txt --html .\results\report.html
 python .\replay.py .\results\pixel-probe-v02\samples.txt --speed 2
 ```
 

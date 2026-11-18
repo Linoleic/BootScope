@@ -1,5 +1,6 @@
-"""Summarize a BootScope probe samples.txt file without inferring causation."""
+"""Summarize, compare, and export BootScope probe captures without inferring causation."""
 import argparse
+from collections import defaultdict
 import math
 import re
 import sys
@@ -10,6 +11,10 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 HEADER = re.compile(r'^--- sample=(\d+) uptime=([0-9.]+) ---$')
+PROC_HEADER = re.compile(
+    r'^# sample=(\d+) uptime=([0-9.]+) tot=(\d+) idle=(\d+) iow=(\d+) '
+    r'mem_avail_mb=(\d+) mem_tot_mb=(\d+)$'
+)
 INIT_STAGE_NS_KEYS = ('init', 'init.first_stage', 'init.selinux')
 INIT_STAGE_MS_PREFIXES = (
     'init.cold_boot_wait',
@@ -195,6 +200,131 @@ def compute_psi_intervals(rows):
     return intervals
 
 
+def read_proc_samples(path):
+    """Read proc.tsv system + per-process CPU/state snapshots."""
+    if not path.is_file():
+        return []
+    samples = []
+    current = None
+    for line in path.read_text(encoding='utf-8').splitlines():
+        match = PROC_HEADER.match(line)
+        if match:
+            if current is not None:
+                samples.append(current)
+            uptime = float(match.group(2))
+            if not math.isfinite(uptime) or uptime < 0:
+                current = None
+                continue
+            current = {
+                'sample': int(match.group(1)),
+                'uptime': uptime,
+                'tot': int(match.group(3)),
+                'idle': int(match.group(4)),
+                'iow': int(match.group(5)),
+                'mem_avail_mb': int(match.group(6)),
+                'mem_tot_mb': int(match.group(7)),
+                'procs': {},
+            }
+            continue
+        if current is None:
+            continue
+        parts = line.split('\t')
+        if len(parts) != 5:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+            comm = parts[2]
+            state = parts[3]
+            ticks = int(parts[4])
+        except ValueError:
+            continue
+        if not comm or not state:
+            continue
+        current['procs'][pid] = {
+            'pid': pid,
+            'ppid': ppid,
+            'comm': comm,
+            'state': state,
+            'ticks': ticks,
+        }
+    if current is not None:
+        samples.append(current)
+    return samples
+
+
+def compute_proc_hotspots(proc_samples):
+    """Compute per-interval CPU/mem metrics, Top CPU processes, and D-state observations."""
+    intervals = []
+    comm_totals = defaultdict(int)
+    comm_peak_pct = defaultdict(float)
+    d_state_events = []
+    prev = None
+
+    for cur in proc_samples:
+        d_procs = sorted({p['comm'] for p in cur['procs'].values() if p['state'] == 'D'})
+        for comm in d_procs:
+            d_state_events.append((cur['uptime'], comm))
+
+        if prev is not None and cur['tot'] > prev['tot']:
+            dtot = cur['tot'] - prev['tot']
+            didle = max(0, cur['idle'] - prev['idle'])
+            diow = max(0, cur['iow'] - prev['iow'])
+            cpu_busy_pct = _clamp_pct((1.0 - didle / dtot) * 100.0)
+            iowait_pct = _clamp_pct((diow / dtot) * 100.0)
+
+            per_comm_ticks = defaultdict(int)
+            for pid, proc in cur['procs'].items():
+                prev_proc = prev['procs'].get(pid)
+                if prev_proc is None:
+                    dticks = max(0, proc['ticks'])
+                elif prev_proc['comm'] == proc['comm'] and proc['ticks'] >= prev_proc['ticks']:
+                    dticks = proc['ticks'] - prev_proc['ticks']
+                else:
+                    dticks = max(0, proc['ticks'])
+                if dticks > 0:
+                    per_comm_ticks[proc['comm']] += dticks
+
+            top = []
+            for comm, dticks in sorted(per_comm_ticks.items(), key=lambda kv: (-kv[1], kv[0])):
+                pct = _clamp_pct((dticks / dtot) * 100.0)
+                comm_totals[comm] += dticks
+                if pct > comm_peak_pct[comm]:
+                    comm_peak_pct[comm] = pct
+                top.append({'comm': comm, 'ticks': dticks, 'cpu_pct': pct})
+
+            intervals.append({
+                'sample': cur['sample'],
+                'uptime': cur['uptime'],
+                'cpu_busy_pct': cpu_busy_pct,
+                'iowait_pct': iowait_pct,
+                'mem_avail_mb': cur['mem_avail_mb'],
+                'mem_tot_mb': cur['mem_tot_mb'],
+                'top': top[:5],
+                'd_procs': d_procs,
+                'mode': 'delta',
+            })
+        else:
+            intervals.append({
+                'sample': cur['sample'],
+                'uptime': cur['uptime'],
+                'cpu_busy_pct': None,
+                'iowait_pct': None,
+                'mem_avail_mb': cur['mem_avail_mb'],
+                'mem_tot_mb': cur['mem_tot_mb'],
+                'top': [],
+                'd_procs': d_procs,
+                'mode': 'baseline',
+            })
+        prev = cur
+
+    top_overall = [
+        {'comm': comm, 'total_ticks': ticks, 'peak_cpu_pct': comm_peak_pct[comm]}
+        for comm, ticks in sorted(comm_totals.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    ]
+    return intervals, top_overall, d_state_events
+
+
 def parse_exit_detail(detail):
     """Extract (status, took_s) from exit detail string 'status=0;took=0.192s'."""
     status, took = None, None
@@ -316,13 +446,42 @@ def _print_psi_summary(intervals):
         )
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('samples', type=Path)
-    args = parser.parse_args()
-    samples = read_samples(args.samples)
+def _print_proc_summary(intervals, top_overall, d_state_events):
+    if not intervals:
+        return
+    deltas = [row for row in intervals if row['mode'] == 'delta']
+    print('\n进程 CPU / 内存 / IO 热点（/proc/stat + /proc/[pid]/stat）')
+    if deltas:
+        peak_cpu = max(deltas, key=lambda r: r['cpu_busy_pct'])
+        min_mem = min(intervals, key=lambda r: r['mem_avail_mb'])
+        print(
+            f"  总 CPU 峰值={peak_cpu['cpu_busy_pct']:.1f}% (iowait={peak_cpu['iowait_pct']:.1f}% @{peak_cpu['uptime']:.2f}s), "
+            f"最低可用内存={min_mem['mem_avail_mb']}/{min_mem['mem_tot_mb']} MB (@{min_mem['uptime']:.2f}s)"
+        )
+    for row in intervals:
+        if row['mode'] == 'baseline':
+            d_note = f"  [D: {', '.join(row['d_procs'][:3])}]" if row['d_procs'] else ''
+            print(f"  +{row['uptime']:6.2f}s  [base ]  Mem={row['mem_avail_mb']}/{row['mem_tot_mb']} MB{d_note}")
+            continue
+        top_str = ', '.join(f"{t['comm']}({t['cpu_pct']:.1f}%)" for t in row['top'][:3]) or '-'
+        d_note = f"  [D: {', '.join(row['d_procs'][:3])}]" if row['d_procs'] else ''
+        print(
+            f"  +{row['uptime']:6.2f}s  [delta]  CPU={row['cpu_busy_pct']:5.1f}% (iow={row['iowait_pct']:4.1f}%)  "
+            f"Mem={row['mem_avail_mb']:4d}/{row['mem_tot_mb']} MB  Top: {top_str}{d_note}"
+        )
+    if top_overall:
+        print('  观测窗口累计 CPU 消耗前 10 进程（按 comm 聚合，100%=全核满载）:')
+        for item in top_overall:
+            print(f"    {item['comm']:<18} 累计={item['total_ticks']:>6} ticks  区间峰值={item['peak_cpu_pct']:5.1f}%")
+    if d_state_events:
+        comms = sorted({comm for _, comm in d_state_events})
+        print(f"  观察到处于 D 态（IO 阻塞）的进程 ({len(d_state_events)} 次): {', '.join(comms[:12])}")
+
+
+def print_single_report(samples_path):
+    samples = read_samples(samples_path)
     if not samples:
-        parser.error('no valid samples')
+        raise ValueError('no valid samples')
     print(f'采样数: {len(samples)}，观察窗口: {samples[0][0][1]:.2f}–{samples[-1][0][1]:.2f} 秒')
     print(f"首次采样的 init 服务数: {len(samples[0][1]['services'])}")
     complete = next((header[1] for header, data in samples if data['boot_completed_raw'] == '1'), None)
@@ -343,8 +502,10 @@ def main():
 
     _print_bootloader_boottime(samples[0][1].get('bootloader_boottime', {}))
     _print_init_stage_properties(samples[-1][1].get('init_stages', ()))
-    _print_init_events_summary(read_init_events(args.samples.with_name('init-events.tsv')))
-    _print_psi_summary(compute_psi_intervals(read_psi_samples(args.samples.with_name('psi.tsv'))))
+    _print_init_events_summary(read_init_events(samples_path.with_name('init-events.tsv')))
+    _print_psi_summary(compute_psi_intervals(read_psi_samples(samples_path.with_name('psi.tsv'))))
+    proc_intervals, proc_top, proc_d = compute_proc_hotspots(read_proc_samples(samples_path.with_name('proc.tsv')))
+    _print_proc_summary(proc_intervals, proc_top, proc_d)
 
     transitions = collect_transitions(samples)
     print(f'\n相邻快照的服务记录变化数: {len(transitions)}（包括新增和时间属性出现）')
@@ -359,7 +520,7 @@ def main():
             stamp = f' [boottime {first_ns / 1e9:.3f}s]' if first_ns is not None else ''
             print(f'  +{uptime:6.2f}s  {name:<36} {detail}{stamp}')
     print('\n所有采样时间为观察时间；首次启动时间不是初始化耗时。')
-    events = read_boot_events(args.samples.with_name('boot-events.tsv'))
+    events = read_boot_events(samples_path.with_name('boot-events.tsv'))
     if events:
         print('\n框架启动事件（原始毫秒字段，相邻差值为原始字段差）')
         prev_value = None
@@ -367,6 +528,33 @@ def main():
             delta = '' if prev_value is None else f'  (+{value - prev_value} ms)'
             print(f'  {tag:<36} {value:>7} ms{delta}')
             prev_value = value
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('samples', type=Path, help='Primary samples.txt path')
+    parser.add_argument('--compare', type=Path, help='Second samples.txt path for A/B comparison (B vs A)')
+    parser.add_argument('--html', type=Path, help='Write self-contained interactive HTML timeline report')
+    args = parser.parse_args()
+
+    try:
+        if args.compare or args.html:
+            from report_utils import format_comparison_text, load_boot_run, render_html_report
+
+            run_a = load_boot_run(args.samples)
+            run_b = load_boot_run(args.compare) if args.compare else None
+            if args.compare:
+                print(format_comparison_text(run_a, run_b))
+            else:
+                print_single_report(args.samples)
+            if args.html:
+                args.html.parent.mkdir(parents=True, exist_ok=True)
+                args.html.write_text(render_html_report(run_a, run_b), encoding='utf-8')
+                print(f'\nHTML 报告已写入: {args.html}')
+        else:
+            print_single_report(args.samples)
+    except ValueError as exc:
+        parser.error(str(exc))
 
 
 if __name__ == '__main__':
