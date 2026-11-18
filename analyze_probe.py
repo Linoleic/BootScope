@@ -122,6 +122,79 @@ def read_init_events(path):
     return events
 
 
+def read_psi_samples(path):
+    """Read psi.tsv entries emitted by probe.sh."""
+    if not path.is_file():
+        return []
+    rows = []
+    for line in path.read_text(encoding='utf-8').splitlines():
+        parts = line.split('\t')
+        if len(parts) != 11:
+            continue
+        try:
+            idx = int(parts[0])
+            uptime = float(parts[1])
+            cpu_some_us, cpu_full_us, cpu_avg10 = int(parts[2]), int(parts[3]), float(parts[4])
+            io_some_us, io_full_us, io_avg10 = int(parts[5]), int(parts[6]), float(parts[7])
+            mem_some_us, mem_full_us, mem_avg10 = int(parts[8]), int(parts[9]), float(parts[10])
+        except ValueError:
+            continue
+        if not (math.isfinite(uptime) and uptime >= 0):
+            continue
+        rows.append({
+            'sample': idx,
+            'uptime': uptime,
+            'cpu_some_us': cpu_some_us,
+            'cpu_full_us': cpu_full_us,
+            'cpu_avg10': cpu_avg10,
+            'io_some_us': io_some_us,
+            'io_full_us': io_full_us,
+            'io_avg10': io_avg10,
+            'mem_some_us': mem_some_us,
+            'mem_full_us': mem_full_us,
+            'mem_avg10': mem_avg10,
+        })
+    return rows
+
+
+def _clamp_pct(value):
+    return max(0.0, min(100.0, value))
+
+
+def compute_psi_intervals(rows):
+    """Convert cumulative PSI microsecond counters into per-sample stall percentages."""
+    intervals = []
+    prev = None
+    for row in rows:
+        if prev is not None and row['uptime'] > prev['uptime']:
+            dt_us = (row['uptime'] - prev['uptime']) * 1e6
+            cpu_some = _clamp_pct((row['cpu_some_us'] - prev['cpu_some_us']) / dt_us * 100.0)
+            io_some = _clamp_pct((row['io_some_us'] - prev['io_some_us']) / dt_us * 100.0)
+            io_full = _clamp_pct((row['io_full_us'] - prev['io_full_us']) / dt_us * 100.0)
+            mem_some = _clamp_pct((row['mem_some_us'] - prev['mem_some_us']) / dt_us * 100.0)
+            mem_full = _clamp_pct((row['mem_full_us'] - prev['mem_full_us']) / dt_us * 100.0)
+            mode = 'delta'
+        else:
+            cpu_some = _clamp_pct(row['cpu_avg10'])
+            io_some = _clamp_pct(row['io_avg10'])
+            io_full = 0.0
+            mem_some = _clamp_pct(row['mem_avg10'])
+            mem_full = 0.0
+            mode = 'avg10'
+        intervals.append({
+            'sample': row['sample'],
+            'uptime': row['uptime'],
+            'cpu_some_pct': cpu_some,
+            'io_some_pct': io_some,
+            'io_full_pct': io_full,
+            'mem_some_pct': mem_some,
+            'mem_full_pct': mem_full,
+            'mode': mode,
+        })
+        prev = row
+    return intervals
+
+
 def parse_exit_detail(detail):
     """Extract (status, took_s) from exit detail string 'status=0;took=0.192s'."""
     status, took = None, None
@@ -151,6 +224,15 @@ def collect_transitions(samples):
             first_ns = after['first_start_boottime_ns'] if after else None
             transitions.append((uptime, name, before_state, after_state, first_ns))
     return transitions
+
+
+def _print_bootloader_boottime(bl):
+    if not bl:
+        return
+    print('\nBootloader 阶段指标（ro.boot.boottime*，原始数值，含义由设备 Bootloader 定义）')
+    items = [f'{k}={v}' for k, v in bl.items()]
+    for idx in range(0, len(items), 6):
+        print('  ' + ', '.join(items[idx:idx + 6]))
 
 
 def _print_init_stage_properties(stages):
@@ -211,6 +293,29 @@ def _print_init_events_summary(init_events):
             print(f'    {took:7.3f}s  {name:<34} status={st} (exit +{ts:.3f}s)')
 
 
+def _print_psi_summary(intervals):
+    if not intervals:
+        return
+    deltas = [row for row in intervals if row['mode'] == 'delta'] or intervals
+    peak_cpu = max(deltas, key=lambda r: r['cpu_some_pct'])
+    peak_io = max(deltas, key=lambda r: r['io_some_pct'])
+    peak_mem = max(deltas, key=lambda r: r['mem_some_pct'])
+    print('\n内核 PSI 资源压力（/proc/pressure，采样间隔内阻塞占比）')
+    print(
+        f"  峰值: CPU some={peak_cpu['cpu_some_pct']:.1f}% (@{peak_cpu['uptime']:.2f}s), "
+        f"IO some={peak_io['io_some_pct']:.1f}% (full={peak_io['io_full_pct']:.1f}% @{peak_io['uptime']:.2f}s), "
+        f"MEM some={peak_mem['mem_some_pct']:.1f}% (@{peak_mem['uptime']:.2f}s)"
+    )
+    for row in intervals:
+        tag = 'avg10' if row['mode'] == 'avg10' else 'delta'
+        print(
+            f"  +{row['uptime']:6.2f}s  [{tag}]  "
+            f"CPU={row['cpu_some_pct']:5.1f}%  "
+            f"IO={row['io_some_pct']:5.1f}% (full={row['io_full_pct']:4.1f}%)  "
+            f"MEM={row['mem_some_pct']:5.1f}%"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('samples', type=Path)
@@ -236,8 +341,10 @@ def main():
             stamp = f'{ns / 1e9:.3f} 秒' if ns is not None else '未知'
             print(f"{name}: 首次采样状态={svc['state']}，系统记录的首次启动={stamp}")
 
+    _print_bootloader_boottime(samples[0][1].get('bootloader_boottime', {}))
     _print_init_stage_properties(samples[-1][1].get('init_stages', ()))
     _print_init_events_summary(read_init_events(args.samples.with_name('init-events.tsv')))
+    _print_psi_summary(compute_psi_intervals(read_psi_samples(args.samples.with_name('psi.tsv'))))
 
     transitions = collect_transitions(samples)
     print(f'\n相邻快照的服务记录变化数: {len(transitions)}（包括新增和时间属性出现）')

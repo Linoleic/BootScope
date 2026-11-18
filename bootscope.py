@@ -24,6 +24,20 @@ def parse_properties(text):
     return props
 
 
+def parse_bootloader_boottime(props):
+    """Parse comma-separated KEY:VALUE tokens from ro.boot.boottime* properties."""
+    parsed = {}
+    for prop_key in ('ro.boot.boottime', 'ro.boot.boottime_extra'):
+        raw = props.get(prop_key, '')
+        if not raw:
+            continue
+        for token in raw.split(','):
+            name, sep, value = token.partition(':')
+            if sep and name and value.isascii() and value.isdecimal():
+                parsed[name] = int(value)
+    return parsed
+
+
 def build_snapshot(props):
     services = {}
     for key, value in props.items():
@@ -38,6 +52,7 @@ def build_snapshot(props):
     return {'captured_at_utc': datetime.now(timezone.utc).isoformat(),
             'boot_completed': None if raw_completed is None else raw_completed == '1',
             'boot_completed_raw': props.get('sys.boot_completed'),
+            'bootloader_boottime': parse_bootloader_boottime(props),
             'services': services}
 
 
@@ -57,6 +72,11 @@ def print_snapshot(snapshot):
     print('BootScope | init 服务快照 | ' + snapshot['captured_at_utc'])
     raw = snapshot['boot_completed_raw']
     print('sys.boot_completed: ' + (raw if raw is not None else '未知'))
+    bl = snapshot.get('bootloader_boottime') or {}
+    if bl:
+        summary = ', '.join(f'{k}={v}' for k, v in list(bl.items())[:8])
+        more = f' (+{len(bl) - 8})' if len(bl) > 8 else ''
+        print(f'Bootloader (ro.boot.boottime*): {summary}{more}')
     print('首次启动时间是开机后的时间点，并非初始化耗时。')
     print('状态表示 init 记录的进程状态，并不代表服务已就绪。')
     for name, service in sorted(snapshot['services'].items()):

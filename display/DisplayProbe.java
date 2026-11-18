@@ -9,12 +9,15 @@ import android.view.DisplayCutout;
 import android.view.SurfaceControl;
 
 import java.io.BufferedReader;
+import java.io.FileReader;
 import java.io.InputStreamReader;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -24,7 +27,7 @@ import java.util.regex.Pattern;
 public final class DisplayProbe {
     private static final String NAME = "BootScopeDisplay";
     private static final int WIDTH = 680;
-    private static final int HEIGHT = 280;
+    private static final int HEIGHT = 316;
     private static final int LAYER = 0x40000001;
     private static final int STAGE_TOTAL = 8;
 
@@ -259,6 +262,101 @@ public final class DisplayProbe {
         }
     }
 
+    private static final class PsiSample {
+        boolean valid;
+        long totalUs;
+        float avg10;
+    }
+
+    private static PsiSample readPsiFile(String path) {
+        PsiSample sample = new PsiSample();
+        try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.startsWith("some ")) {
+                    String[] parts = line.split("\\s+");
+                    float avg = 0f;
+                    long total = 0L;
+                    boolean hasAvg = false;
+                    boolean hasTotal = false;
+                    for (String p : parts) {
+                        if (p.startsWith("avg10=")) {
+                            avg = Float.parseFloat(p.substring(6));
+                            hasAvg = true;
+                        } else if (p.startsWith("total=")) {
+                            total = Long.parseLong(p.substring(6));
+                            hasTotal = true;
+                        }
+                    }
+                    if (hasAvg && hasTotal) {
+                        sample.valid = true;
+                        sample.avg10 = avg;
+                        sample.totalUs = total;
+                    }
+                    break;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return sample;
+    }
+
+    private static int computePsiPct(PsiSample cur, PsiSample prev, long dtMs) {
+        if (!cur.valid) return -1;
+        int rounded;
+        if (prev != null && prev.valid && dtMs > 0 && cur.totalUs >= prev.totalUs) {
+            double pct = ((double) (cur.totalUs - prev.totalUs) / ((double) dtMs * 1000.0)) * 100.0;
+            rounded = (int) Math.round(pct);
+        } else {
+            rounded = Math.round(cur.avg10);
+        }
+        return Math.max(0, Math.min(100, rounded));
+    }
+
+    private static String buildBootloaderLine(Method get) {
+        List<String[]> kvs = new ArrayList<>();
+        try {
+            appendKvTokens(property(get, "ro.boot.boottime"), kvs);
+            appendKvTokens(property(get, "ro.boot.boottime_extra"), kvs);
+        } catch (Exception ignored) {
+        }
+        if (kvs.isEmpty()) return "BL N/A";
+        String[] preferred = {"2BLE", "3BLE", "AVB", "KL", "DISP", "DRAM_TRAIN", "SW"};
+        StringBuilder sb = new StringBuilder("BL");
+        for (String key : preferred) {
+            for (String[] kv : kvs) {
+                if (key.equals(kv[0]) && !"0".equals(kv[1])) {
+                    String tok = " " + kv[0] + ":" + kv[1];
+                    if (sb.length() + tok.length() <= 35) {
+                        sb.append(tok);
+                    }
+                    break;
+                }
+            }
+        }
+        if (sb.length() == 2) {
+            for (String[] kv : kvs) {
+                String tok = " " + kv[0] + ":" + kv[1];
+                if (sb.length() + tok.length() <= 35) {
+                    sb.append(tok);
+                } else {
+                    break;
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    private static void appendKvTokens(String raw, List<String[]> out) {
+        if (raw == null || raw.isEmpty()) return;
+        for (String item : raw.split(",")) {
+            int idx = item.indexOf(':');
+            if (idx > 0 && idx + 1 < item.length()) {
+                out.add(new String[]{item.substring(0, idx), item.substring(idx + 1)});
+            }
+        }
+    }
+
     private static void run(String[] args) throws Exception {
         boolean preview = args.length == 1 && "--preview".equals(args[0]);
         Method get = Class.forName("android.os.SystemProperties").getMethod("get", String.class);
@@ -280,6 +378,9 @@ public final class DisplayProbe {
         DisplayGeometry lastGeometry = null;
         Map<String, String> previousStates = new LinkedHashMap<>();
         String lastTransition = "WAITING TRANSITIONS";
+        String bootloaderLine = buildBootloaderLine(get);
+        PsiSample[] prevPsi = new PsiSample[3];
+        long prevPsiMs = 0L;
 
         try {
             bitmap = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888);
@@ -308,7 +409,21 @@ public final class DisplayProbe {
                     lastTransition = transition;
                 }
 
-                draw(canvas, paint, get, preview, geometry, stageRef.get(), previousStates, lastTransition);
+                long nowMs = SystemClock.elapsedRealtime();
+                PsiSample[] curPsi = new PsiSample[]{
+                    readPsiFile("/proc/pressure/cpu"),
+                    readPsiFile("/proc/pressure/io"),
+                    readPsiFile("/proc/pressure/memory")
+                };
+                long dtMs = prevPsiMs > 0L ? (nowMs - prevPsiMs) : 0L;
+                int cpuPct = computePsiPct(curPsi[0], prevPsi[0], dtMs);
+                int ioPct = computePsiPct(curPsi[1], prevPsi[1], dtMs);
+                int memPct = computePsiPct(curPsi[2], prevPsi[2], dtMs);
+                prevPsi = curPsi;
+                prevPsiMs = nowMs;
+
+                draw(canvas, paint, get, preview, geometry, stageRef.get(), previousStates,
+                     cpuPct, ioPct, memPct, bootloaderLine, lastTransition);
                 submit(control, bitmap, first, geometryChanged ? geometry : null);
 
                 if (first) {
@@ -497,7 +612,8 @@ public final class DisplayProbe {
     private static void draw(
             Canvas canvas, Paint paint, Method get, boolean preview,
             DisplayGeometry geometry, StageInfo stage,
-            Map<String, String> states, String lastTransition) throws Exception {
+            Map<String, String> states, int cpuPct, int ioPct, int memPct,
+            String bootloaderLine, String lastTransition) throws Exception {
         String uptime = String.format(Locale.ROOT, "%.2fS", SystemClock.elapsedRealtime() / 1000d);
         String modeLabel = geometry.label();
 
@@ -542,10 +658,18 @@ public final class DisplayProbe {
             Locale.ROOT, "APEX:%-4s ARTD:%-4s WPA:%-4s",
             states.get("apexd"), states.get("artd"), states.get("wpa_supplicant")
         );
-        BootFont.draw(canvas, paint, row1, 24, 166, 3);
-        BootFont.draw(canvas, paint, row2, 24, 198, 3);
+        BootFont.draw(canvas, paint, row1, 24, 156, 3);
+        BootFont.draw(canvas, paint, row2, 24, 186, 3);
+
+        paint.setColor(0xff7be0ca);
+        String psiLine = (cpuPct >= 0 && ioPct >= 0 && memPct >= 0)
+            ? String.format(Locale.ROOT, "PSI CPU:%3d%% IO:%3d%% MEM:%3d%%", cpuPct, ioPct, memPct)
+            : "PSI N/A";
+        BootFont.draw(canvas, paint, psiLine, 24, 218, 3);
 
         paint.setColor(0xff9ec3d6);
+        BootFont.draw(canvas, paint, bootloaderLine, 24, 248, 3);
+
         String bc = property(get, "sys.boot_completed");
         String animExit = property(get, "service.bootanim.exit");
         String bcStr = (bc == null || bc.isEmpty()) ? "0" : bc;
@@ -554,7 +678,7 @@ public final class DisplayProbe {
             ? String.format(Locale.ROOT, "BC=%s ANIM_EXIT=%s", bcStr, animStr)
             : "LAST " + lastTransition;
         if (footer.length() > 35) footer = footer.substring(0, 35);
-        BootFont.draw(canvas, paint, footer, 24, 238, 3);
+        BootFont.draw(canvas, paint, footer, 24, 280, 3);
     }
 
     private static Method findMethod(Class<?> cls, String name, Class<?>... params) {

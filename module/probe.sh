@@ -25,12 +25,37 @@ mkdir "$RUN/.probe.lock" 2>/dev/null || exit 0
 COUNT=0
 COMPLETE_COUNT=0
 while [ "$COUNT" -lt 60 ]; do
-    PROPS=$(getprop | grep -E '^\[(init\.svc\.|ro\.boottime\.|sys\.boot_completed\]|dev\.bootcomplete\]|service\.bootanim\.exit\])')
+    PROPS=$(getprop | grep -E '^\[(init\.svc\.|ro\.boottime\.|ro\.boot\.boottime(_extra)?\]|sys\.boot_completed\]|dev\.bootcomplete\]|service\.bootanim\.exit\])')
     UPTIME=$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null)
     {
         echo "--- sample=$COUNT uptime=$UPTIME ---"
         [ -n "$PROPS" ] && printf '%s\n' "$PROPS"
     } >> "$RUN/samples.txt" || exit 1
+    if [ -r /proc/pressure/cpu ] && [ -r /proc/pressure/io ] && [ -r /proc/pressure/memory ]; then
+        awk -v s="$COUNT" -v u="$UPTIME" '
+            FNR == 1 { idx++ }
+            $1 == "some" {
+                for (i = 2; i <= NF; i++) {
+                    if ($i ~ /^avg10=/) a = substr($i, 7)
+                    if ($i ~ /^total=/) t = substr($i, 7)
+                }
+                some_t[idx] = t; some_a[idx] = a
+            }
+            $1 == "full" {
+                for (i = 2; i <= NF; i++) {
+                    if ($i ~ /^total=/) f = substr($i, 7)
+                }
+                full_t[idx] = f
+            }
+            END {
+                printf "%s\t%s\t%s\t%s\t%.2f\t%s\t%s\t%.2f\t%s\t%s\t%.2f\n",
+                    s, u,
+                    (some_t[1] != "" ? some_t[1] : "0"), (full_t[1] != "" ? full_t[1] : "0"), some_a[1] + 0,
+                    (some_t[2] != "" ? some_t[2] : "0"), (full_t[2] != "" ? full_t[2] : "0"), some_a[2] + 0,
+                    (some_t[3] != "" ? some_t[3] : "0"), (full_t[3] != "" ? full_t[3] : "0"), some_a[3] + 0
+            }
+        ' /proc/pressure/cpu /proc/pressure/io /proc/pressure/memory >> "$RUN/psi.tsv" 2>/dev/null
+    fi
     COUNT=$((COUNT + 1))
     if [ "$(getprop sys.boot_completed)" = 1 ]; then
         COMPLETE_COUNT=$((COMPLETE_COUNT + 1))
@@ -123,4 +148,5 @@ done
     echo "events_count=$(wc -l < "$RUN/boot-events.tsv" | tr -d ' ')"
     echo "dmesg_exit=$(cat "$RUN/dmesg-exit.txt" 2>/dev/null)"
     echo "init_events_count=$(wc -l < "$RUN/init-events.tsv" | tr -d ' ')"
+    echo "psi_samples=$([ -f "$RUN/psi.tsv" ] && wc -l < "$RUN/psi.tsv" | tr -d ' ' || echo 0)"
 } >> "$RUN/metadata.txt"

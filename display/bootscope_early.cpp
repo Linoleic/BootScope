@@ -22,7 +22,7 @@
 namespace {
 
 constexpr int kWidth = 680;
-constexpr int kHeight = 280;
+constexpr int kHeight = 316;
 constexpr int32_t kLayer = 0x40000001;
 constexpr int kStageTotal = 10;
 constexpr const char* kLayerName = "BootScopeDisplay";
@@ -38,7 +38,7 @@ constexpr uint32_t kColorPrimary = 0xfff7f4ed;  // #edf4f7
 constexpr uint32_t kColorMuted = 0xffd6c39e;    // #9ec3d6
 constexpr uint32_t kColorTrack = 0xff42321e;    // #1e3242
 
-constexpr const char* kFontChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./:-_=+@>?";
+constexpr const char* kFontChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./:-_=+@>%?";
 constexpr const char* kFontGlyphs[] = {
     "0E11111F111111", "1E11111E11111E", "0E11101010110E", "1E11111111111E",
     "1F10101E10101F", "1F10101E101010", "0E11101711110F", "1111111F111111",
@@ -52,7 +52,7 @@ constexpr const char* kFontGlyphs[] = {
     "0E11110E11110E", "0E11110F01010E",
     "00000000000C0C", "01020204080810", "000C0C000C0C00", "0000001F000000",
     "0000000000001F", "00001F001F0000", "0004041F040400", "0E11171517100E",
-    "10080402040810", "0E110102040004"
+    "10080402040810", "18190204081303", "0E110102040004"
 };
 
 struct Sp {
@@ -185,10 +185,16 @@ int64_t boottime_ms() {
 }
 
 std::string get_prop(const char* name) {
-    char buf[PROP_VALUE_MAX]{};
-    int len = __system_property_get(name, buf);
-    if (len <= 0) return "";
-    return std::string(buf, (size_t)len);
+    const prop_info* pi = __system_property_find(name);
+    if (!pi) return "";
+    std::string result;
+    __system_property_read_callback(
+        pi,
+        [](void* cookie, const char*, const char* value, uint32_t) {
+            if (value) *(std::string*)cookie = value;
+        },
+        &result);
+    return result;
 }
 
 std::string svc_state(const char* svc) {
@@ -442,6 +448,97 @@ ANativeWindow* extract_anw(void* surf_ptr) {
     return nullptr;
 }
 
+struct PsiSample {
+    bool valid = false;
+    uint64_t total_us = 0;
+    float avg10 = 0.0f;
+};
+
+bool read_psi_file(const char* path, PsiSample* out) {
+    FILE* f = fopen(path, "r");
+    if (!f) return false;
+    char line[256];
+    bool ok = false;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "some ", 5) == 0) {
+            float avg10 = 0.0f;
+            unsigned long long total = 0;
+            const char* a = strstr(line, "avg10=");
+            const char* t = strstr(line, "total=");
+            if (a && t && sscanf(a, "avg10=%f", &avg10) == 1 && sscanf(t, "total=%llu", &total) == 1) {
+                out->valid = true;
+                out->avg10 = avg10;
+                out->total_us = (uint64_t)total;
+                ok = true;
+            }
+            break;
+        }
+    }
+    fclose(f);
+    return ok;
+}
+
+int compute_psi_pct(const PsiSample& cur, const PsiSample& prev, int64_t dt_ms) {
+    if (!cur.valid) return -1;
+    if (prev.valid && dt_ms > 0 && cur.total_us >= prev.total_us) {
+        double pct = ((double)(cur.total_us - prev.total_us) / ((double)dt_ms * 1000.0)) * 100.0;
+        int rounded = (int)lround(pct);
+        if (rounded < 0) rounded = 0;
+        if (rounded > 100) rounded = 100;
+        return rounded;
+    }
+    int rounded = (int)lroundf(cur.avg10);
+    if (rounded < 0) rounded = 0;
+    if (rounded > 100) rounded = 100;
+    return rounded;
+}
+
+void append_kv_tokens(const std::string& raw, std::vector<std::pair<std::string, std::string>>& kvs) {
+    size_t start = 0;
+    while (start < raw.size()) {
+        size_t comma = raw.find(',', start);
+        std::string item = (comma == std::string::npos) ? raw.substr(start) : raw.substr(start, comma - start);
+        size_t colon = item.find(':');
+        if (colon != std::string::npos && colon > 0 && colon + 1 < item.size()) {
+            kvs.emplace_back(item.substr(0, colon), item.substr(colon + 1));
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+}
+
+std::string build_bootloader_line() {
+    std::vector<std::pair<std::string, std::string>> kvs;
+    append_kv_tokens(get_prop("ro.boot.boottime"), kvs);
+    append_kv_tokens(get_prop("ro.boot.boottime_extra"), kvs);
+    if (kvs.empty()) return "BL N/A";
+
+    const char* preferred[] = {"2BLE", "3BLE", "AVB", "KL", "DISP", "DRAM_TRAIN", "SW"};
+    std::string line = "BL";
+    for (const char* key : preferred) {
+        for (const auto& kv : kvs) {
+            if (kv.first == key && kv.second != "0") {
+                std::string tok = " " + kv.first + ":" + kv.second;
+                if (line.size() + tok.size() <= 35) {
+                    line += tok;
+                }
+                break;
+            }
+        }
+    }
+    if (line == "BL") {
+        for (const auto& kv : kvs) {
+            std::string tok = " " + kv.first + ":" + kv.second;
+            if (line.size() + tok.size() <= 35) {
+                line += tok;
+            } else {
+                break;
+            }
+        }
+    }
+    return line;
+}
+
 void write_pid_file() {
     FILE* f = fopen(kPidPath, "w");
     if (f) {
@@ -597,6 +694,9 @@ int main(int argc, char** argv) {
     const char* short_names[] = {"SF", "ANIM", "ZYG", "APEX", "ARTD", "WPA"};
     std::string prev_states[6];
     std::string last_transition = "WAITING TRANSITIONS";
+    std::string bootloader_line = build_bootloader_line();
+    PsiSample prev_psi[3];
+    int64_t prev_psi_ms = 0;
     Geometry last_geom;
     bool has_geom = false;
     bool first = true;
@@ -636,7 +736,8 @@ int main(int argc, char** argv) {
             has_geom = true;
         }
 
-        double uptime_s = boottime_ms() / 1000.0;
+        int64_t now_ms = boottime_ms();
+        double uptime_s = now_ms / 1000.0;
         std::string cur_states[6];
         for (int i = 0; i < 6; i++) {
             cur_states[i] = svc_state(watched[i]);
@@ -648,6 +749,17 @@ int main(int argc, char** argv) {
             }
             prev_states[i] = cur_states[i];
         }
+
+        PsiSample cur_psi[3];
+        read_psi_file("/proc/pressure/cpu", &cur_psi[0]);
+        read_psi_file("/proc/pressure/io", &cur_psi[1]);
+        read_psi_file("/proc/pressure/memory", &cur_psi[2]);
+        int64_t dt_ms = prev_psi_ms > 0 ? (now_ms - prev_psi_ms) : 0;
+        int cpu_pct = compute_psi_pct(cur_psi[0], prev_psi[0], dt_ms);
+        int io_pct = compute_psi_pct(cur_psi[1], prev_psi[1], dt_ms);
+        int mem_pct = compute_psi_pct(cur_psi[2], prev_psi[2], dt_ms);
+        for (int i = 0; i < 3; i++) prev_psi[i] = cur_psi[i];
+        prev_psi_ms = now_ms;
 
         StageInfo stage;
         {
@@ -697,8 +809,18 @@ int main(int argc, char** argv) {
                      cur_states[0].c_str(), cur_states[1].c_str(), cur_states[2].c_str());
             snprintf(row2, sizeof(row2), "APEX:%-4s ARTD:%-4s WPA:%-4s",
                      cur_states[3].c_str(), cur_states[4].c_str(), cur_states[5].c_str());
-            draw_text(px, buf.stride, row1, 24, 166, 3, kColorPrimary);
-            draw_text(px, buf.stride, row2, 24, 198, 3, kColorPrimary);
+            draw_text(px, buf.stride, row1, 24, 156, 3, kColorPrimary);
+            draw_text(px, buf.stride, row2, 24, 186, 3, kColorPrimary);
+
+            char psi_buf[48];
+            if (cpu_pct >= 0 && io_pct >= 0 && mem_pct >= 0) {
+                snprintf(psi_buf, sizeof(psi_buf), "PSI CPU:%3d%% IO:%3d%% MEM:%3d%%",
+                         cpu_pct, io_pct, mem_pct);
+            } else {
+                snprintf(psi_buf, sizeof(psi_buf), "PSI N/A");
+            }
+            draw_text(px, buf.stride, psi_buf, 24, 218, 3, kColorAccent);
+            draw_text(px, buf.stride, bootloader_line.c_str(), 24, 248, 3, kColorMuted);
 
             std::string footer;
             if (last_transition == "WAITING TRANSITIONS") {
@@ -710,7 +832,7 @@ int main(int argc, char** argv) {
                 footer = "LAST " + last_transition;
             }
             if (footer.size() > 35) footer.resize(35);
-            draw_text(px, buf.stride, footer.c_str(), 24, 238, 3, kColorMuted);
+            draw_text(px, buf.stride, footer.c_str(), 24, 280, 3, kColorMuted);
 
             ANativeWindow_unlockAndPost(anw);
         }

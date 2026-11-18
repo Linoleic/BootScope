@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import time
 
-from analyze_probe import read_boot_events, read_init_events, read_samples
+from analyze_probe import compute_psi_intervals, read_boot_events, read_init_events, read_psi_samples, read_samples
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -35,11 +35,24 @@ def _format_service_line(prefix, name, service):
     return f'{prefix} {STATE_ICONS[state]} {name:<26} {state:<10}{since}'
 
 
-def render(subtitle, uptime, snapshot, recent, changed_other=(), init_phase=None):
+def _format_bootloader_line(bl):
+    if not bl:
+        return None
+    preferred = ('2BLE', '3BLE', 'AVB', 'KL', 'DISP', 'DRAM_TRAIN', 'SW')
+    tokens = [f'{k}={bl[k]}' for k in preferred if k in bl and bl[k] != 0]
+    if not tokens:
+        tokens = [f'{k}={v}' for k, v in list(bl.items())[:5]]
+    return 'Bootloader (raw)  ' + '  '.join(tokens[:5])
+
+
+def render(subtitle, uptime, snapshot, recent, changed_other=(), init_phase=None, psi_row=None, bootloader=None):
     services = snapshot['services']
     yield f'BootScope  /  recorded boot{uptime:>8.2f} s'
     phase_note = f'  ·  phase: {init_phase}' if init_phase else ''
     yield f'{subtitle}  ·  {len(services)} visible init services{phase_note}'
+    bl_line = _format_bootloader_line(bootloader)
+    if bl_line:
+        yield bl_line
     yield ''
     for title, names in GROUPS:
         yield title
@@ -55,6 +68,11 @@ def render(subtitle, uptime, snapshot, recent, changed_other=(), init_phase=None
             prefix = '└─' if number == len(shown) - 1 else '├─'
             yield _format_service_line(prefix, name, services.get(name))
     yield ''
+    if psi_row:
+        yield (
+            f"PSI ({psi_row['mode']})  cpu={psi_row['cpu_some_pct']:.1f}%  "
+            f"io={psi_row['io_some_pct']:.1f}%  mem={psi_row['mem_some_pct']:.1f}%"
+        )
     completed = snapshot['boot_completed_raw'] or '?'
     anim_exit = snapshot['bootanim_exit_raw'] or '?'
     yield f'sys.boot_completed={completed}  ·  service.bootanim.exit={anim_exit}'
@@ -63,7 +81,7 @@ def render(subtitle, uptime, snapshot, recent, changed_other=(), init_phase=None
     yield from recent or ('  Waiting for a second sample',)
 
 
-def _pre_snapshot_frames(init_events, first_sample_uptime, recent):
+def _pre_snapshot_frames(init_events, first_sample_uptime, recent, bootloader=None):
     """Synthesize early-boot timeline frames from dmesg init-events.tsv."""
     early = [ev for ev in init_events if ev[0] < first_sample_uptime]
     if not early:
@@ -106,16 +124,23 @@ def _pre_snapshot_frames(init_events, first_sample_uptime, recent):
                 'services': {k: dict(v) for k, v in services.items()},
             }
             subtitle = f'dmesg init {len(emitted) + 1}'
-            emitted.append((ts, '\n'.join(render(subtitle, ts, snapshot, recent, init_phase=phase))))
+            emitted.append((
+                ts,
+                '\n'.join(render(subtitle, ts, snapshot, recent, init_phase=phase, bootloader=bootloader)),
+            ))
             last_emit_ts = ts
     return emitted, phase
 
 
-def frames(samples, init_events=None):
+def frames(samples, init_events=None, psi_intervals=None):
     recent = deque(maxlen=6)
+    bootloader = samples[0][1].get('bootloader_boottime') if samples else None
+    psi_by_sample = {row['sample']: row for row in (psi_intervals or ())}
     init_phase = None
     if init_events and samples:
-        pre_frames, init_phase = _pre_snapshot_frames(init_events, samples[0][0][1], recent)
+        pre_frames, init_phase = _pre_snapshot_frames(
+            init_events, samples[0][0][1], recent, bootloader=bootloader
+        )
         yield from pre_frames
 
     changed_other = []
@@ -144,7 +169,16 @@ def frames(samples, init_events=None):
                     recent.append(f'  +{header[1]:.2f} s  {label}={snapshot[key] or "?"}')
         subtitle = f'Sample {header[0] + 1}/{len(samples)}'
         yield header[1], '\n'.join(
-            render(subtitle, header[1], snapshot, recent, changed_other, init_phase=init_phase)
+            render(
+                subtitle,
+                header[1],
+                snapshot,
+                recent,
+                changed_other,
+                init_phase=init_phase,
+                psi_row=psi_by_sample.get(header[0]),
+                bootloader=bootloader,
+            )
         )
         previous = snapshot
 
@@ -176,7 +210,8 @@ def main():
     try:
         samples = read_samples(args.samples)
         init_events = read_init_events(args.samples.with_name('init-events.tsv'))
-        playback = list(frames(samples, init_events=init_events))
+        psi_intervals = compute_psi_intervals(read_psi_samples(args.samples.with_name('psi.tsv')))
+        playback = list(frames(samples, init_events=init_events, psi_intervals=psi_intervals))
         events = read_boot_events(args.samples.with_name('boot-events.tsv'))
     except (OSError, ValueError) as error:
         parser.error(str(error))

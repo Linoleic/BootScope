@@ -126,6 +126,35 @@ class BootScopeParsingTests(unittest.TestCase):
         self.assertEqual(len(events), 3)
         self.assertEqual(analyze_probe.parse_exit_detail(events[2][3]), ('0', 0.192))
 
+    def test_parse_bootloader_boottime_and_psi_intervals(self):
+        props = {
+            'ro.boot.boottime': '0BLE:45,2BLE:673,AVB:125,KL:13',
+            'ro.boot.boottime_extra': 'DISP:322,DRAM_TRAIN:133',
+        }
+        bl = bootscope.parse_bootloader_boottime(props)
+        self.assertEqual(bl['2BLE'], 673)
+        self.assertEqual(bl['AVB'], 125)
+        self.assertEqual(bl['DISP'], 322)
+        self.assertEqual(bl['DRAM_TRAIN'], 133)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv = Path(tmp) / 'psi.tsv'
+            tsv.write_text(
+                '0\t12.00\t1000000\t0\t12.50\t200000\t50000\t3.00\t10000\t0\t0.00\n'
+                '1\t13.00\t1250000\t0\t14.00\t700000\t150000\t5.00\t10000\t0\t0.00\n'
+                'bad\tline\n',
+                encoding='utf-8',
+            )
+            rows = analyze_probe.read_psi_samples(tsv)
+        self.assertEqual(len(rows), 2)
+        intervals = analyze_probe.compute_psi_intervals(rows)
+        self.assertEqual(intervals[0]['mode'], 'avg10')
+        self.assertAlmostEqual(intervals[0]['cpu_some_pct'], 12.5)
+        self.assertEqual(intervals[1]['mode'], 'delta')
+        self.assertAlmostEqual(intervals[1]['cpu_some_pct'], 25.0)
+        self.assertAlmostEqual(intervals[1]['io_some_pct'], 50.0)
+        self.assertAlmostEqual(intervals[1]['io_full_pct'], 10.0)
+
 
 class ReplayTests(unittest.TestCase):
     def test_replay_tracks_non_core_service_changes(self):
@@ -173,6 +202,32 @@ class ReplayTests(unittest.TestCase):
         self.assertLess(playback[0][0], 11.71)
         self.assertIn('dmesg init 1', playback[0][1])
         self.assertIn('Sample 1/1', playback[-1][1])
+
+    def test_replay_renders_bootloader_and_psi(self):
+        sample_text = '\n'.join([
+            '--- sample=0 uptime=11.71 ---',
+            '[ro.boot.boottime]: [2BLE:673,AVB:125,KL:13]',
+            '[init.svc.bootanim]: [running]',
+            '[sys.boot_completed]: [0]',
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'samples.txt'
+            path.write_text(sample_text, encoding='utf-8')
+            samples = analyze_probe.read_samples(path)
+        psi_intervals = [{
+            'sample': 0,
+            'uptime': 11.71,
+            'cpu_some_pct': 18.5,
+            'io_some_pct': 42.0,
+            'io_full_pct': 5.0,
+            'mem_some_pct': 0.0,
+            'mem_full_pct': 0.0,
+            'mode': 'delta',
+        }]
+        playback = list(replay.frames(samples, psi_intervals=psi_intervals))
+        self.assertIn('Bootloader (raw)', playback[0][1])
+        self.assertIn('2BLE=673', playback[0][1])
+        self.assertIn('PSI (delta)  cpu=18.5%  io=42.0%  mem=0.0%', playback[0][1])
 
 
 class PackagingAndModuleTests(unittest.TestCase):
@@ -261,6 +316,8 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('BASE=/data/adb/bootscope', display_sh)
         self.assertIn('.probe.lock', probe_sh)
         self.assertIn('init-events.tsv', probe_sh)
+        self.assertIn('psi.tsv', probe_sh)
+        self.assertIn('ro\\.boot\\.boottime', probe_sh)
         self.assertIn('dmesg', probe_sh)
         self.assertIn('.display.lock', display_sh)
         self.assertIn('early_native', display_sh)

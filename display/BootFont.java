@@ -6,7 +6,7 @@ import java.util.Locale;
 
 /** Small bitmap glyphs for drawing before Android's font service is available. */
 final class BootFont {
-    private static final String CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./:-_=+@>?";
+    private static final String CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./:-_=+@>%?";
     // Each hex pair is one row of a five-pixel-wide glyph.
     private static final String[] GLYPHS = {
         "0E11111F111111", "1E11111E11111E", "0E11101010110E", "1E11111111111E",
@@ -21,7 +21,7 @@ final class BootFont {
         "0E11110E11110E", "0E11110F01010E",
         "00000000000C0C", "01020204080810", "000C0C000C0C00", "0000001F000000",
         "0000000000001F", "00001F001F0000", "0004041F040400", "0E11171517100E",
-        "10080402040810", "0E110102040004"
+        "10080402040810", "18190204081303", "0E110102040004"
     };
     private static final int FALLBACK_INDEX = CHARACTERS.indexOf('?');
 
