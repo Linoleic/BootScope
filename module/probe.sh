@@ -15,7 +15,7 @@ chmod 700 "$RUN" || exit 1
 # Atomic mkdir prevents two copies of probe.sh from collecting the same boot.
 mkdir "$RUN/.probe.lock" 2>/dev/null || exit 0
 {
-    echo "format=2"
+    echo "format=3"
     echo "boot_id=$BOOT_ID"
     echo "started_uptime=$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null)"
     echo "android_version=$(getprop ro.build.version.release)"
@@ -60,10 +60,67 @@ done
         count++
     }
 ' > "$RUN/boot-events.tsv"
+# Extract sanitized early-boot init milestones and service lifecycles from dmesg.
+(
+    timeout -k 1 3 dmesg 2>"$RUN/dmesg-error.txt"
+    echo "$?" > "$RUN/dmesg-exit.txt"
+) | awk '
+    BEGIN { sq = sprintf("%c", 39) }
+    function emit(ts, kind, name, detail) {
+        if (count < 1024) {
+            printf "%.6f\t%s\t%s\t%s\n", ts, kind, name, detail
+            count++
+        }
+    }
+    {
+        line = $0
+        sub(/\r$/, "", line)
+        if (!match(line, /^[[:space:]]*\[[[:space:]]*[0-9]+\.[0-9]+\][[:space:]]+init:[[:space:]]+/)) next
+        prefix = substr(line, RSTART, RLENGTH)
+        msg = substr(line, RSTART + RLENGTH)
+        sub(/^[[:space:]]*\[[[:space:]]*/, "", prefix)
+        sub(/\][[:space:]]+init:[[:space:]]+$/, "", prefix)
+        ts = prefix + 0
+
+        if (msg ~ /^Loaded [0-9]+ kernel modules took [0-9]+ ms$/) {
+            split(msg, f, " ")
+            emit(ts, "phase", "kernel_modules", f[2] "_modules_" f[6] "ms")
+        } else if (index(msg, "Switching root to " sq) == 1) {
+            target = substr(msg, 20)
+            sub(sq "$", "", target)
+            if (target ~ /^\/[A-Za-z0-9_.-]+$/) emit(ts, "phase", "switch_root", target)
+        } else if (msg == "init second stage started!") {
+            emit(ts, "phase", "second_stage", "started")
+        } else if (msg ~ /^processing action \([A-Za-z0-9_.-]+\) from /) {
+            act = msg
+            sub(/^processing action \(/, "", act)
+            sub(/\) from .*$/, "", act)
+            if (!seen_act[act]++) emit(ts, "phase", act, "")
+        } else if (index(msg, "starting service " sq) == 1 && msg ~ /\.\.\.$/) {
+            svc = substr(msg, 19)
+            sub(sq "\\.\\.\\.$", "", svc)
+            if (svc ~ /^[A-Za-z0-9_.-]+$/) emit(ts, "start", svc, "")
+        } else if (index(msg, "Service " sq) == 1 && msg ~ / exited with status [0-9]+ .* took [0-9.]+ seconds$/) {
+            svc = substr(msg, 10)
+            sub(sq " \\(pid .*$", "", svc)
+            st = msg
+            sub(/^.* exited with status /, "", st)
+            sub(/ .*$/, "", st)
+            tk = msg
+            sub(/^.* took /, "", tk)
+            sub(/ seconds$/, "", tk)
+            if (svc ~ /^[A-Za-z0-9_.-]+$/ && st ~ /^[0-9]+$/ && tk ~ /^[0-9.]+$/) {
+                emit(ts, "exit", svc, "status=" st ";took=" tk "s")
+            }
+        }
+    }
+' > "$RUN/init-events.tsv"
 {
     echo "finished_uptime=$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null)"
     echo "samples=$COUNT"
     echo "boot_completed=$(getprop sys.boot_completed)"
     echo "events_logcat_exit=$(cat "$RUN/logcat-exit.txt" 2>/dev/null)"
     echo "events_count=$(wc -l < "$RUN/boot-events.tsv" | tr -d ' ')"
+    echo "dmesg_exit=$(cat "$RUN/dmesg-exit.txt" 2>/dev/null)"
+    echo "init_events_count=$(wc -l < "$RUN/init-events.tsv" | tr -d ' ')"
 } >> "$RUN/metadata.txt"

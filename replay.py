@@ -1,4 +1,4 @@
-"""Replay recorded Android startup snapshots as a terminal panel."""
+"""Replay recorded Android startup snapshots and early init events as a terminal panel."""
 import argparse
 from collections import deque
 import math
@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import time
 
-from analyze_probe import read_boot_events, read_samples
+from analyze_probe import read_boot_events, read_init_events, read_samples
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -21,6 +21,11 @@ CORE_NAMES = {name for _, names in GROUPS for name in names}
 STATE_ICONS = {'running': '●', 'stopped': '○', 'restarting': '↻',
                'stopping': '◐', 'unknown': '?'}
 MAX_OTHER_CHANGED = 6
+MAJOR_PHASES = {
+    'kernel_modules', 'switch_root', 'second_stage', 'early-init',
+    'init', 'late-init', 'early-fs', 'fs', 'post-fs', 'late-fs',
+    'post-fs-data', 'zygote-start', 'early-boot', 'boot',
+}
 
 
 def _format_service_line(prefix, name, service):
@@ -30,11 +35,11 @@ def _format_service_line(prefix, name, service):
     return f'{prefix} {STATE_ICONS[state]} {name:<26} {state:<10}{since}'
 
 
-def render(header, snapshot, recent, total, changed_other=()):
-    index, uptime = header
+def render(subtitle, uptime, snapshot, recent, changed_other=(), init_phase=None):
     services = snapshot['services']
     yield f'BootScope  /  recorded boot{uptime:>8.2f} s'
-    yield f'Sample {index + 1}/{total}  ·  {len(services)} visible init services'
+    phase_note = f'  ·  phase: {init_phase}' if init_phase else ''
+    yield f'{subtitle}  ·  {len(services)} visible init services{phase_note}'
     yield ''
     for title, names in GROUPS:
         yield title
@@ -58,8 +63,61 @@ def render(header, snapshot, recent, total, changed_other=()):
     yield from recent or ('  Waiting for a second sample',)
 
 
-def frames(samples):
+def _pre_snapshot_frames(init_events, first_sample_uptime, recent):
+    """Synthesize early-boot timeline frames from dmesg init-events.tsv."""
+    early = [ev for ev in init_events if ev[0] < first_sample_uptime]
+    if not early:
+        return [], None
+    services = {}
+    phase = None
+    last_emit_ts = None
+    emitted = []
+
+    for idx, (ts, kind, name, detail) in enumerate(early):
+        milestone = False
+        if kind == 'phase':
+            if name in MAJOR_PHASES or phase is None:
+                phase = name
+                milestone = True
+            note = f' ({detail})' if detail else ''
+            if name in MAJOR_PHASES:
+                recent.append(f'  +{ts:.2f} s  phase: {name}{note}')
+        elif kind == 'start':
+            services.setdefault(name, {'state': 'running', 'first_start_boottime_ns': int(ts * 1e9)})
+            services[name]['state'] = 'running'
+            if name in CORE_NAMES:
+                milestone = True
+                recent.append(f'  +{ts:.2f} s  {name}: started (dmesg)')
+        elif kind == 'exit':
+            entry = services.setdefault(name, {'state': 'stopped', 'first_start_boottime_ns': int(ts * 1e9)})
+            entry['state'] = 'stopped'
+            if name in CORE_NAMES:
+                milestone = True
+                recent.append(f'  +{ts:.2f} s  {name}: exited ({detail})')
+
+        is_last = idx == len(early) - 1
+        next_ts = early[idx + 1][0] if not is_last else ts
+        batch_end = is_last or (next_ts - ts) >= 0.05
+        time_due = last_emit_ts is None or (ts - last_emit_ts) >= 0.75
+        if (milestone and batch_end) or (time_due and batch_end) or is_last:
+            snapshot = {
+                'boot_completed_raw': None,
+                'bootanim_exit_raw': None,
+                'services': {k: dict(v) for k, v in services.items()},
+            }
+            subtitle = f'dmesg init {len(emitted) + 1}'
+            emitted.append((ts, '\n'.join(render(subtitle, ts, snapshot, recent, init_phase=phase))))
+            last_emit_ts = ts
+    return emitted, phase
+
+
+def frames(samples, init_events=None):
     recent = deque(maxlen=6)
+    init_phase = None
+    if init_events and samples:
+        pre_frames, init_phase = _pre_snapshot_frames(init_events, samples[0][0][1], recent)
+        yield from pre_frames
+
     changed_other = []
     seen_other = set()
     previous = None
@@ -84,7 +142,10 @@ def frames(samples):
                                ('boot_completed_raw', 'sys.boot_completed')):
                 if previous[key] != snapshot[key]:
                     recent.append(f'  +{header[1]:.2f} s  {label}={snapshot[key] or "?"}')
-        yield header[1], '\n'.join(render(header, snapshot, recent, len(samples), changed_other))
+        subtitle = f'Sample {header[0] + 1}/{len(samples)}'
+        yield header[1], '\n'.join(
+            render(subtitle, header[1], snapshot, recent, changed_other, init_phase=init_phase)
+        )
         previous = snapshot
 
 
@@ -113,7 +174,9 @@ def main():
     if not math.isfinite(args.speed) or args.speed <= 0:
         parser.error('--speed must be a finite positive number')
     try:
-        playback = list(frames(read_samples(args.samples)))
+        samples = read_samples(args.samples)
+        init_events = read_init_events(args.samples.with_name('init-events.tsv'))
+        playback = list(frames(samples, init_events=init_events))
         events = read_boot_events(args.samples.with_name('boot-events.tsv'))
     except (OSError, ValueError) as error:
         parser.error(str(error))

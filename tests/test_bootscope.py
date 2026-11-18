@@ -93,6 +93,39 @@ class BootScopeParsingTests(unittest.TestCase):
             [('boot_progress_start', 10940), ('wm_boot_animation_done', 21139)],
         )
 
+    def test_extract_init_boottime_and_read_init_events(self):
+        props = {
+            'ro.boottime.init': '570269002',
+            'ro.boottime.init.first_stage': '622935058',
+            'ro.boottime.init.selinux': '116764364',
+            'ro.boottime.init.modules': '407',
+            'ro.boottime.init.mount_all.late': '417',
+            'ro.boottime.init.fsck.data': '154',
+            'ro.boottime.init.shared_modem_platform': '10809729659',
+            'ro.boottime.init_display': '1978278971',
+        }
+        stages = analyze_probe.extract_init_boottime(props)
+        names = [name for name, _, _, _ in stages]
+        self.assertIn('init.first_stage', names)
+        self.assertIn('init.modules', names)
+        self.assertNotIn('init.shared_modem_platform', names)
+        self.assertNotIn('init_display', names)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv = Path(tmp) / 'init-events.tsv'
+            tsv.write_text(
+                '0.984145\tphase\tkernel_modules\t179_modules_407ms\n'
+                '1.414118\tstart\tueventd\t\n'
+                '1.618918\texit\tapexd-bootstrap\tstatus=0;took=0.192000s\n'
+                'bad\tphase\tx\n'
+                '-1.0\tstart\ty\n'
+                '2.0\tunknown\tz\n',
+                encoding='utf-8',
+            )
+            events = analyze_probe.read_init_events(tsv)
+        self.assertEqual(len(events), 3)
+        self.assertEqual(analyze_probe.parse_exit_detail(events[2][3]), ('0', 0.192))
+
 
 class ReplayTests(unittest.TestCase):
     def test_replay_tracks_non_core_service_changes(self):
@@ -117,6 +150,29 @@ class ReplayTests(unittest.TestCase):
         self.assertIn('Waiting for a second sample', playback[0][1])
         self.assertIn('Changed services (other)', playback[1][1])
         self.assertIn('artd: absent → running', playback[1][1])
+
+    def test_replay_prepends_dmesg_init_frames(self):
+        sample_text = '\n'.join([
+            '--- sample=0 uptime=11.71 ---',
+            '[init.svc.ueventd]: [running]',
+            '[init.svc.surfaceflinger]: [running]',
+            '[init.svc.bootanim]: [running]',
+            '[sys.boot_completed]: [1]',
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'samples.txt'
+            path.write_text(sample_text, encoding='utf-8')
+            samples = analyze_probe.read_samples(path)
+        init_events = [
+            (0.984, 'phase', 'kernel_modules', '179_modules_407ms'),
+            (1.414, 'start', 'ueventd', ''),
+            (2.116, 'start', 'surfaceflinger', ''),
+        ]
+        playback = list(replay.frames(samples, init_events=init_events))
+        self.assertGreater(len(playback), 1)
+        self.assertLess(playback[0][0], 11.71)
+        self.assertIn('dmesg init 1', playback[0][1])
+        self.assertIn('Sample 1/1', playback[-1][1])
 
 
 class PackagingAndModuleTests(unittest.TestCase):
@@ -180,6 +236,8 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('BASE=/data/adb/bootscope', probe_sh)
         self.assertIn('BASE=/data/adb/bootscope', display_sh)
         self.assertIn('.probe.lock', probe_sh)
+        self.assertIn('init-events.tsv', probe_sh)
+        self.assertIn('dmesg', probe_sh)
         self.assertIn('.display.lock', display_sh)
 
     def test_build_module_headless_zip(self):

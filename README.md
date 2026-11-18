@@ -26,12 +26,12 @@ adb -s <设备序列号> shell "su -c 'ksud module uninstall bootscope_probe; ks
 
 `module/service.sh` 非阻塞地分别拉起两个独立后台任务，彼此互不影响：
 
-1. **采集探针（`probe.sh`）**：每轮采样 init 服务状态、首次启动时间及开机动画和启动完成属性，最多 60 次；连续 3 次检测到 `sys.boot_completed=1` 后，限时读取当前 `events` 环形缓冲，仅保存允许的启动事件标签和毫秒数值。快照记录观测时刻，事件字段使用各写入方定义的时钟。
+1. **采集探针（`probe.sh`）**：每轮采样 init 服务状态、首次启动时间、`ro.boottime.init.*` 阶段耗时及开机动画和启动完成属性，最多 60 次；连续 3 次检测到 `sys.boot_completed=1` 后，限时读取当前 `events` 环形缓冲（仅保存允许的框架启动事件标签与毫秒数值）以及 `dmesg` 中的脱敏 `init:` 阶段/服务启停事件（`init-events.tsv`），补齐 `0s` 到 `service.sh` 拉起前的早期启动过程。快照记录观测时刻，事件字段使用各写入方定义的时钟。
 2. **开机显示（`display.sh` + `DisplayProbe`）**：在模块内存在 `classes.dex` 且未配置禁用开关时，通过 `app_process` 在系统动画期间向 SurfaceFlinger 提交状态叠加层，动态跟踪分辨率与刷新率变化并避让顶部挖孔区域，展示启动进度条、当前阶段事件及关键服务状态。动画退出、系统启动完成或达到时间上限时释放图层；显示脚本额外设置了进程超时。
    - 如需仅关闭开机显示而保留数据采集，创建 `/data/adb/bootscope/disable_display`（或模块目录下的 `disable_display`）即可，重启后自动跳过显示探针。
 
 每次开机的输出统一保存在设备 `/data/adb/bootscope/<boot-id>/`（目录权限 0700，文件默认 0600），通过独立的 `.probe.lock` / `.display.lock` 防止同一开机周期重复运行：
-- 采集结果：`metadata.txt`、`samples.txt`、`boot-events.tsv`、`logcat-exit.txt`、`logcat-error.txt`
+- 采集结果：`metadata.txt`、`samples.txt`、`boot-events.tsv`、`init-events.tsv`、`logcat-exit.txt`、`logcat-error.txt`、`dmesg-exit.txt`、`dmesg-error.txt`
 - 显示诊断：`display-status.txt`、`display-renderer.txt`、`display-compositor.txt`
 
 日志和属性可能包含敏感的系统信息；不会自动上传，也不会自动删除旧记录。在目标设备确认 `ksud module --help` 支持后，可使用 `ksud module disable bootscope` 禁用模块，重启后验证其不再运行。不要将不同 KernelSU 分支的恢复行为视为相同；安装和重启前确认设备的实际恢复方式。
