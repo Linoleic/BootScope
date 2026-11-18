@@ -1,7 +1,7 @@
 """Summarize a BootScope probe samples.txt file without inferring causation."""
 import argparse
-import re
 import sys
+import re
 from pathlib import Path
 from bootscope import build_snapshot, parse_properties
 
@@ -44,6 +44,23 @@ def read_boot_events(path):
     return events
 
 
+def collect_transitions(samples):
+    """Return observed service changes across consecutive samples."""
+    transitions = []
+    for (_, previous), (header, current) in zip(samples, samples[1:]):
+        uptime = header[1]
+        for name in sorted(set(previous['services']) | set(current['services'])):
+            before = previous['services'].get(name)
+            after = current['services'].get(name)
+            if before == after:
+                continue
+            before_state = before['state'] if before else 'absent'
+            after_state = after['state'] if after else 'absent'
+            first_ns = after['first_start_boottime_ns'] if after else None
+            transitions.append((uptime, name, before_state, after_state, first_ns))
+    return transitions
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('samples', type=Path)
@@ -68,17 +85,27 @@ def main():
             ns = svc['first_start_boottime_ns']
             stamp = f'{ns / 1e9:.3f} 秒' if ns is not None else '未知'
             print(f"{name}: 首次采样状态={svc['state']}，系统记录的首次启动={stamp}")
-    changes = 0
-    for (_, previous), (header, current) in zip(samples, samples[1:]):
-        names = set(previous['services']) | set(current['services'])
-        changes += sum(previous['services'].get(n) != current['services'].get(n) for n in names)
-    print(f'相邻快照的服务记录变化数: {changes}（包括新增和时间属性出现）')
-    print('所有采样时间为观察时间；首次启动时间不是初始化耗时。')
+    transitions = collect_transitions(samples)
+    print(f'相邻快照的服务记录变化数: {len(transitions)}（包括新增和时间属性出现）')
+    if transitions:
+        print('\n观察到的服务变化（时间为采样观察时刻）')
+        for uptime, name, before_state, after_state, first_ns in transitions:
+            detail = (
+                f'{before_state} -> {after_state}'
+                if before_state != after_state
+                else f'{after_state}（记录到首次启动时间）'
+            )
+            stamp = f' [boottime {first_ns / 1e9:.3f}s]' if first_ns is not None else ''
+            print(f'  +{uptime:6.2f}s  {name:<36} {detail}{stamp}')
+    print('\n所有采样时间为观察时间；首次启动时间不是初始化耗时。')
     events = read_boot_events(args.samples.with_name('boot-events.tsv'))
     if events:
-        print('\n框架启动事件（原始毫秒字段，时钟含义由各事件定义）')
+        print('\n框架启动事件（原始毫秒字段，相邻差值为原始字段差）')
+        prev_value = None
         for tag, value in events:
-            print(f'  {tag:<34} {value:>7} ms')
+            delta = '' if prev_value is None else f'  (+{value - prev_value} ms)'
+            print(f'  {tag:<36} {value:>7} ms{delta}')
+            prev_value = value
 
 
 if __name__ == '__main__':

@@ -9,16 +9,28 @@ import time
 
 from analyze_probe import read_boot_events, read_samples
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 GROUPS = (
     ('Core services', ('ueventd', 'logd', 'servicemanager', 'vold')),
     ('Display', ('surfaceflinger', 'bootanim')),
     ('Runtime', ('zygote', 'zygote_secondary')),
 )
+CORE_NAMES = {name for _, names in GROUPS for name in names}
 STATE_ICONS = {'running': '●', 'stopped': '○', 'restarting': '↻',
                'stopping': '◐', 'unknown': '?'}
+MAX_OTHER_CHANGED = 6
 
 
-def render(header, snapshot, recent, total):
+def _format_service_line(prefix, name, service):
+    state = service.get('state', 'unknown') if service else 'unknown'
+    first = service.get('first_start_boottime_ns') if service else None
+    since = f'  first start +{first / 1e9:.3f} s' if first is not None else ''
+    return f'{prefix} {STATE_ICONS[state]} {name:<26} {state:<10}{since}'
+
+
+def render(header, snapshot, recent, total, changed_other=()):
     index, uptime = header
     services = snapshot['services']
     yield f'BootScope  /  recorded boot{uptime:>8.2f} s'
@@ -28,11 +40,15 @@ def render(header, snapshot, recent, total):
         yield title
         for number, name in enumerate(names):
             prefix = '└─' if number == len(names) - 1 else '├─'
-            service = services.get(name, {})
-            state = service.get('state', 'unknown')
-            first = service.get('first_start_boottime_ns')
-            since = f'  first start +{first / 1e9:.3f} s' if first is not None else ''
-            yield f'{prefix} {STATE_ICONS[state]} {name:<17} {state:<10}{since}'
+            yield _format_service_line(prefix, name, services.get(name))
+    if changed_other:
+        shown = list(changed_other)[-MAX_OTHER_CHANGED:]
+        extra = len(changed_other) - len(shown)
+        heading = 'Changed services (other)' if extra <= 0 else f'Changed services (other, +{extra} earlier)'
+        yield heading
+        for number, name in enumerate(shown):
+            prefix = '└─' if number == len(shown) - 1 else '├─'
+            yield _format_service_line(prefix, name, services.get(name))
     yield ''
     completed = snapshot['boot_completed_raw'] or '?'
     anim_exit = snapshot['bootanim_exit_raw'] or '?'
@@ -43,21 +59,32 @@ def render(header, snapshot, recent, total):
 
 
 def frames(samples):
-    recent = deque(maxlen=5)
+    recent = deque(maxlen=6)
+    changed_other = []
+    seen_other = set()
     previous = None
     for header, snapshot in samples:
         if previous is not None:
-            for _, names in GROUPS:
-                for name in names:
-                    before = previous['services'].get(name, {}).get('state', 'unknown')
-                    after = snapshot['services'].get(name, {}).get('state', 'unknown')
-                    if before != after:
-                        recent.append(f'  +{header[1]:.2f} s  {name}: {before} → {after}')
+            all_names = sorted(set(previous['services']) | set(snapshot['services']))
+            for name in all_names:
+                before_svc = previous['services'].get(name)
+                after_svc = snapshot['services'].get(name)
+                if before_svc == after_svc:
+                    continue
+                before = before_svc['state'] if before_svc else 'absent'
+                after = after_svc['state'] if after_svc else 'absent'
+                if before != after:
+                    recent.append(f'  +{header[1]:.2f} s  {name}: {before} → {after}')
+                else:
+                    recent.append(f'  +{header[1]:.2f} s  {name}: boottime recorded')
+                if name not in CORE_NAMES and name not in seen_other:
+                    seen_other.add(name)
+                    changed_other.append(name)
             for key, label in (('bootanim_exit_raw', 'service.bootanim.exit'),
                                ('boot_completed_raw', 'sys.boot_completed')):
                 if previous[key] != snapshot[key]:
                     recent.append(f'  +{header[1]:.2f} s  {label}={snapshot[key] or "?"}')
-        yield header[1], '\n'.join(render(header, snapshot, recent, len(samples)))
+        yield header[1], '\n'.join(render(header, snapshot, recent, len(samples), changed_other))
         previous = snapshot
 
 

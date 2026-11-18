@@ -24,9 +24,11 @@ chmod 700 "$RUN" || exit 1
 COUNT=0
 COMPLETE_COUNT=0
 while [ "$COUNT" -lt 60 ]; do
+    PROPS=$(getprop | grep -E '^\[(init\.svc\.|ro\.boottime\.|sys\.boot_completed\]|dev\.bootcomplete\]|service\.bootanim\.exit\])')
+    UPTIME=$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null)
     {
-        echo "--- sample=$COUNT uptime=$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null) ---"
-        getprop | grep -E '^\[(init\.svc\.|ro\.boottime\.|sys\.boot_completed\]|dev\.bootcomplete\]|service\.bootanim\.exit\])'
+        echo "--- sample=$COUNT uptime=$UPTIME ---"
+        [ -n "$PROPS" ] && printf '%s\n' "$PROPS"
     } >> "$RUN/samples.txt" || exit 1
     COUNT=$((COUNT + 1))
     if [ "$(getprop sys.boot_completed)" = 1 ]; then
@@ -62,5 +64,5 @@ done
     echo "samples=$COUNT"
     echo "boot_completed=$(getprop sys.boot_completed)"
     echo "events_logcat_exit=$(cat "$RUN/logcat-exit.txt" 2>/dev/null)"
-    echo "events_count=$(wc -l < "$RUN/boot-events.tsv")"
+    echo "events_count=$(wc -l < "$RUN/boot-events.tsv" | tr -d ' ')"
 } >> "$RUN/metadata.txt"

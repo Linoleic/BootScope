@@ -43,11 +43,11 @@ public final class DisplayProbe {
             long deadline = SystemClock.elapsedRealtime() + (preview ? 4000 : 12000);
             boolean first = true;
             while (SystemClock.elapsedRealtime() < deadline) {
-                draw(canvas, paint, get, preview);
                 if (!preview && !animationActive(get)) {
                     System.out.println("exit=animation_ended");
                     return;
                 }
+                draw(canvas, paint, get, preview);
                 submit(control, bitmap, first);
                 if (first) {
                     System.out.println("first_frame_submitted_ms=" + SystemClock.elapsedRealtime());
@@ -94,7 +94,7 @@ public final class DisplayProbe {
 
     private static String state(Method get, String name) throws Exception {
         String value = property(get, "init.svc." + name);
-        return value.isEmpty() ? "unknown" : value;
+        return (value == null || value.isEmpty()) ? "unknown" : value;
     }
 
     private static void draw(Canvas canvas, Paint paint, Method get, boolean preview) throws Exception {
