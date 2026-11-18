@@ -1,6 +1,6 @@
 id=bootscope
 name=BootScope
-version=0.3.0
-versionCode=3
+version=0.4.0
+versionCode=4
 author=BootScope
-description=Boot state collector and experimental startup display overlay.
+description=Boot state collector and early-boot startup display overlay.

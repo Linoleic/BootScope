@@ -213,15 +213,29 @@ class PackagingAndModuleTests(unittest.TestCase):
             )
 
     def test_bootfont_glyph_table_consistency(self):
-        src = (ROOT / 'display' / 'BootFont.java').read_text(encoding='utf-8')
-        chars_match = re.search(r'CHARACTERS\s*=\s*"([^"]+)"', src)
-        self.assertIsNotNone(chars_match)
-        characters = chars_match.group(1)
-        glyphs_block = re.search(r'GLYPHS\s*=\s*\{(.*?)\};', src, re.DOTALL)
-        self.assertIsNotNone(glyphs_block)
-        glyphs = re.findall(r'"([0-9A-F]{14})"', glyphs_block.group(1))
-        self.assertEqual(len(characters), len(glyphs))
-        self.assertIn('?', characters)
+        for rel in ('display/BootFont.java', 'display/bootscope_early.cpp'):
+            src = (ROOT / rel).read_text(encoding='utf-8')
+            chars_match = re.search(r'(?:CHARACTERS|kFontChars)\s*=\s*"([^"]+)"', src)
+            self.assertIsNotNone(chars_match, rel)
+            characters = chars_match.group(1)
+            glyphs_block = re.search(r'(?:GLYPHS|kFontGlyphs\[\])\s*=\s*\{(.*?)\};', src, re.DOTALL)
+            self.assertIsNotNone(glyphs_block, rel)
+            glyphs = re.findall(r'"([0-9A-F]{14})"', glyphs_block.group(1))
+            self.assertEqual(len(characters), len(glyphs), rel)
+            self.assertIn('?', characters, rel)
+
+    def test_build_module_ndk_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sdk = Path(tmp)
+            clang_name = 'aarch64-linux-android33-clang++' + ('.cmd' if build_module.os.name == 'nt' else '')
+            for ver in ('25.2.9519653', '26.3.11579264'):
+                clang = sdk / 'ndk' / ver / 'toolchains' / 'llvm' / 'prebuilt' / 'host-x86_64' / 'bin' / clang_name
+                clang.parent.mkdir(parents=True)
+                clang.write_bytes(b'')
+            resolved = build_module.resolve_ndk(sdk, None)
+            self.assertEqual(resolved.name, '26.3.11579264')
+            clang_path, _ = build_module.resolve_ndk_clang(resolved)
+            self.assertTrue(clang_path.is_file())
 
     def test_unified_module_scripts_structure(self):
         service_sh = (ROOT / 'module' / 'service.sh').read_text(encoding='utf-8')
@@ -231,6 +245,14 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('&', service_sh)
         self.assertNotIn('app_process', service_sh)
 
+        customize_sh = (ROOT / 'module' / 'customize.sh').read_text(encoding='utf-8')
+        self.assertIn('bootscope_early', customize_sh)
+        self.assertNotRegex(customize_sh, r'(?m)^\s*exit\b')
+
+        rc = (ROOT / 'module' / 'initrc' / 'bootscope.rc').read_text(encoding='utf-8')
+        self.assertIn('service bootscope_early /metadata/vold/ksu/bootscope_early', rc)
+        self.assertIn('on late-fs', rc)
+
         probe_sh = (ROOT / 'module' / 'probe.sh').read_text(encoding='utf-8')
         display_sh = (ROOT / 'module' / 'display.sh').read_text(encoding='utf-8')
         self.assertIn('BASE=/data/adb/bootscope', probe_sh)
@@ -239,6 +261,7 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('init-events.tsv', probe_sh)
         self.assertIn('dmesg', probe_sh)
         self.assertIn('.display.lock', display_sh)
+        self.assertIn('early_native', display_sh)
 
     def test_build_module_headless_zip(self):
         subprocess.run([sys.executable, str(ROOT / 'build_module.py'), '--no-display'], check=True)

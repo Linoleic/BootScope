@@ -78,6 +78,41 @@ def resolve_d8(sdk: Path, build_tools: str | None) -> Path:
     return max(candidates, key=lambda item: item[0])[1]
 
 
+def resolve_ndk(sdk: Path, explicit: Path | None) -> Path:
+    """Resolve Android NDK directory from argument, environment, or SDK ndk/."""
+    if explicit is not None:
+        if not explicit.is_dir():
+            raise FileNotFoundError(f'Missing NDK directory at {explicit}')
+        return explicit
+    for var in ('ANDROID_NDK_HOME', 'ANDROID_NDK_ROOT'):
+        env = os.environ.get(var)
+        if env and Path(env).is_dir():
+            return Path(env)
+    ndk_dir = sdk / 'ndk'
+    candidates = []
+    if ndk_dir.is_dir():
+        for entry in ndk_dir.iterdir():
+            if entry.is_dir() and (entry / 'toolchains').is_dir():
+                candidates.append((_version_key(entry.name), entry))
+    if not candidates:
+        raise FileNotFoundError(f'No Android NDK found under {ndk_dir}')
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def resolve_ndk_clang(ndk: Path) -> tuple[Path, Path]:
+    """Return (aarch64-linux-android33-clang++, llvm-strip) paths inside an NDK."""
+    prebuilt = ndk / 'toolchains' / 'llvm' / 'prebuilt'
+    clang_name = f'aarch64-linux-android{MIN_PLATFORM_API}-clang++' + ('.cmd' if os.name == 'nt' else '')
+    strip_name = 'llvm-strip' + ('.exe' if os.name == 'nt' else '')
+    if prebuilt.is_dir():
+        for host_dir in prebuilt.iterdir():
+            clang = host_dir / 'bin' / clang_name
+            strip = host_dir / 'bin' / strip_name
+            if clang.is_file():
+                return clang, strip
+    raise FileNotFoundError(f'Missing {clang_name} under {prebuilt}')
+
+
 def build_display_dex(root: Path, sdk: Path, platform: str | None, build_tools: str | None) -> Path:
     """Compile display/*.java into dist/bootscope-display/classes.dex."""
     android_jar = resolve_android_jar(sdk, platform)
@@ -100,11 +135,32 @@ def build_display_dex(root: Path, sdk: Path, platform: str | None, build_tools: 
     return output / 'classes.dex'
 
 
+def build_early_native(root: Path, sdk: Path, explicit_ndk: Path | None) -> Path:
+    """Compile display/bootscope_early.cpp into dist/bootscope-display/bootscope_early."""
+    ndk = resolve_ndk(sdk, explicit_ndk)
+    clang, strip = resolve_ndk_clang(ndk)
+    output = root / 'dist' / 'bootscope-display'
+    output.mkdir(parents=True, exist_ok=True)
+    binary = output / 'bootscope_early'
+    source = root / 'display' / 'bootscope_early.cpp'
+    subprocess.run(
+        [str(clang), '-O2', '-Wall', '-Wextra', '-static-libstdc++',
+         '-lnativewindow', '-ldl', '-lm', '-o', str(binary), str(source)],
+        check=True,
+    )
+    if strip.is_file():
+        subprocess.run([str(strip), str(binary)], check=True)
+    return binary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--no-display', action='store_true',
-                        help='Package shell probe only without compiling classes.dex')
+                        help='Package shell probe only without compiling display components')
+    parser.add_argument('--no-early', action='store_true',
+                        help='Skip compiling the native early-boot display binary')
     parser.add_argument('--sdk', type=Path, help='Android SDK root directory')
+    parser.add_argument('--ndk', type=Path, help='Android NDK root directory')
     parser.add_argument('--platform', help=f'Platform folder (default: {PREFERRED_PLATFORM} or latest)')
     parser.add_argument('--build-tools', help=f'Build-tools version (default: {PREFERRED_BUILD_TOOLS} or latest)')
     args = parser.parse_args()
@@ -114,25 +170,40 @@ def main() -> None:
     version = read_module_version(module_dir / 'module.prop')
 
     dex_path = None
+    early_path = None
     if not args.no_display:
         sdk = resolve_sdk_path(args.sdk)
         dex_path = build_display_dex(root, sdk, args.platform, args.build_tools)
         print(dex_path)
+        if not args.no_early:
+            early_path = build_early_native(root, sdk, args.ndk)
+            print(early_path)
 
     suffix = '-headless' if args.no_display else ''
     output = root / 'dist' / f'bootscope-{version}{suffix}.zip'
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    files = ['module.prop', 'service.sh', 'probe.sh']
+    text_entries = [
+        ('module.prop', 0o100644),
+        ('service.sh', 0o100755),
+        ('probe.sh', 0o100755),
+    ]
     if not args.no_display:
-        files.append('display.sh')
+        text_entries.append(('display.sh', 0o100755))
+        if early_path is not None:
+            text_entries.extend([
+                ('customize.sh', 0o100755),
+                ('uninstall.sh', 0o100755),
+                ('initrc/bootscope.rc', 0o100644),
+            ])
 
     with ZipFile(output, 'w', ZIP_DEFLATED) as archive:
-        for name in files:
-            mode = 0o100755 if name.endswith('.sh') else 0o100644
-            write_text_file(archive, name, module_dir / name, mode)
+        for rel_path, mode in text_entries:
+            write_text_file(archive, rel_path, module_dir / rel_path, mode)
         if dex_path is not None:
             write_zip_entry(archive, 'classes.dex', dex_path.read_bytes(), 0o100444)
+        if early_path is not None:
+            write_zip_entry(archive, 'bootscope_early', early_path.read_bytes(), 0o100755)
     print(output)
 
 

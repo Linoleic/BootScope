@@ -1,0 +1,9 @@
+service bootscope_early /metadata/vold/ksu/bootscope_early
+    user root
+    group root
+    seclabel u:r:ksu:s0
+    oneshot
+    disabled
+
+on late-fs
+    start bootscope_early
