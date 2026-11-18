@@ -1,6 +1,7 @@
 """Unit and packaging regression tests for BootScope."""
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ from zipfile import ZipFile
 
 import analyze_probe
 import bootscope
-import build_display
+import build_module
 import package_utils
 import replay
 
@@ -133,7 +134,7 @@ class PackagingAndModuleTests(unittest.TestCase):
                 self.assertEqual(info.external_attr >> 16, 0o100755)
                 self.assertEqual(archive.read('service.sh'), b'#!/system/bin/sh\necho ok\n')
 
-    def test_build_display_sdk_resolution(self):
+    def test_build_module_sdk_resolution(self):
         with tempfile.TemporaryDirectory() as tmp:
             sdk = Path(tmp)
             for api in ('android-30', 'android-35', 'android-37.0'):
@@ -141,17 +142,17 @@ class PackagingAndModuleTests(unittest.TestCase):
                 jar.parent.mkdir(parents=True)
                 jar.write_bytes(b'')
             for ver in ('34.0.0', '36.1.0'):
-                exe_name = 'd8.bat' if build_display.os.name == 'nt' else 'd8'
+                exe_name = 'd8.bat' if build_module.os.name == 'nt' else 'd8'
                 d8 = sdk / 'build-tools' / ver / exe_name
                 d8.parent.mkdir(parents=True)
                 d8.write_bytes(b'')
 
             self.assertEqual(
-                build_display.resolve_android_jar(sdk, None).parent.name,
+                build_module.resolve_android_jar(sdk, None).parent.name,
                 'android-37.0',
             )
             self.assertEqual(
-                build_display.resolve_d8(sdk, None).parent.name,
+                build_module.resolve_d8(sdk, None).parent.name,
                 '36.1.0',
             )
 
@@ -166,16 +167,25 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertEqual(len(characters), len(glyphs))
         self.assertIn('?', characters)
 
-    def test_display_service_sh_is_non_blocking(self):
-        service_sh = (ROOT / 'display' / 'service.sh').read_text(encoding='utf-8')
-        self.assertIn('run.sh', service_sh)
+    def test_unified_module_scripts_structure(self):
+        service_sh = (ROOT / 'module' / 'service.sh').read_text(encoding='utf-8')
+        self.assertIn('probe.sh', service_sh)
+        self.assertIn('display.sh', service_sh)
+        self.assertIn('disable_display', service_sh)
         self.assertIn('&', service_sh)
         self.assertNotIn('app_process', service_sh)
 
-    def test_build_module_produces_valid_zip(self):
-        subprocess.run(['python', str(ROOT / 'build_module.py')], check=True)
+        probe_sh = (ROOT / 'module' / 'probe.sh').read_text(encoding='utf-8')
+        display_sh = (ROOT / 'module' / 'display.sh').read_text(encoding='utf-8')
+        self.assertIn('BASE=/data/adb/bootscope', probe_sh)
+        self.assertIn('BASE=/data/adb/bootscope', display_sh)
+        self.assertIn('.probe.lock', probe_sh)
+        self.assertIn('.display.lock', display_sh)
+
+    def test_build_module_headless_zip(self):
+        subprocess.run([sys.executable, str(ROOT / 'build_module.py'), '--no-display'], check=True)
         version = package_utils.read_module_version(ROOT / 'module' / 'module.prop')
-        archive_path = ROOT / 'dist' / f'bootscope-probe-{version}.zip'
+        archive_path = ROOT / 'dist' / f'bootscope-{version}-headless.zip'
         self.assertTrue(archive_path.is_file())
         with ZipFile(archive_path, 'r') as archive:
             self.assertEqual(sorted(archive.namelist()), ['module.prop', 'probe.sh', 'service.sh'])

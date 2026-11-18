@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # Read-only boot observations, stored in a private per-boot directory.
 umask 077
-BASE=/data/adb/bootscope-probe
+BASE=/data/adb/bootscope
 BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 case "$BOOT_ID" in
     ????????-????-????-????-????????????) ;;
@@ -10,9 +10,10 @@ esac
 mkdir -p "$BASE" || exit 1
 chmod 700 "$BASE" || exit 1
 RUN="$BASE/$BOOT_ID"
-# The atomic mkdir also prevents two copies from collecting the same boot.
-mkdir "$RUN" 2>/dev/null || exit 0
+mkdir -p "$RUN" || exit 1
 chmod 700 "$RUN" || exit 1
+# Atomic mkdir prevents two copies of probe.sh from collecting the same boot.
+mkdir "$RUN/.probe.lock" 2>/dev/null || exit 0
 {
     echo "format=2"
     echo "boot_id=$BOOT_ID"

@@ -1,6 +1,6 @@
-id=bootscope_probe
-name=BootScope Probe
-version=0.2.0
-versionCode=2
+id=bootscope
+name=BootScope
+version=0.3.0
+versionCode=3
 author=BootScope
-description=Experimental bounded boot data collector; no boot screen.
+description=Boot state collector and experimental startup display overlay.

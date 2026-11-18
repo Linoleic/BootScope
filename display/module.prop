@@ -1,6 +1,0 @@
-id=bootscope_display_probe
-name=BootScope Display Probe
-version=0.1.0
-versionCode=1
-author=BootScope
-description=Experimental startup panel for Pixel 7 Pro.
