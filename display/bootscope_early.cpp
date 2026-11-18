@@ -83,6 +83,7 @@ struct LibGuiApi {
                      const Sp&, const void*, uint32_t*) = nullptr;
     std::vector<uint64_t> (*get_phys_ids)() = nullptr;
     Sp (*get_phys_token)(uint64_t) = nullptr;
+    Sp (*get_internal_token)() = nullptr;
     int32_t (*get_display_state)(const Sp&, void*) = nullptr;
     int32_t (*get_active_mode)(const Sp&, void*) = nullptr;
     Sp (*sc_get_surface)(void*) = nullptr;
@@ -115,6 +116,8 @@ struct LibGuiApi {
             libgui, "_ZN7android21SurfaceComposerClient21getPhysicalDisplayIdsEv");
         get_phys_token = (Sp(*)(uint64_t))dlsym(
             libgui, "_ZN7android21SurfaceComposerClient23getPhysicalDisplayTokenENS_17PhysicalDisplayIdE");
+        get_internal_token = (Sp(*)())dlsym(
+            libgui, "_ZN7android21SurfaceComposerClient23getInternalDisplayTokenEv");
         get_display_state = (int32_t(*)(const Sp&, void*))dlsym(
             libgui, "_ZN7android21SurfaceComposerClient15getDisplayStateERKNS_2spINS_7IBinderEEEPNS_2ui12DisplayStateE");
         get_active_mode = (int32_t(*)(const Sp&, void*))dlsym(
@@ -134,8 +137,9 @@ struct LibGuiApi {
         tx_apply = (int32_t(*)(void*, bool, bool))dlsym(
             libgui, "_ZN7android21SurfaceComposerClient11Transaction5applyEbb");
 
+        bool has_display_lookup = (get_phys_ids && get_phys_token) || get_internal_token;
         return str8_ctor && str8_dtor && lm_ctor && scc_default && scc_create
-            && get_phys_ids && get_phys_token && get_display_state && sc_get_surface
+            && has_display_lookup && get_display_state && sc_get_surface
             && tx_ctor && tx_set_layer && tx_set_pos && tx_set_matrix && tx_show && tx_apply;
     }
 };
@@ -216,12 +220,19 @@ bool parse_mode_prop(const char* key, int* w, int* h, int* hz) {
     return false;
 }
 
+bool sane_dim(int v) {
+    return v >= 240 && v <= 8192;
+}
+
 Geometry query_geometry(const LibGuiApi& gui, const Sp& display_token) {
     Geometry g;
     bool got_size = false;
+    uint32_t orientation = 0;
     if (display_token.ptr) {
         uint32_t state[32]{};
-        if (gui.get_display_state(display_token, state) == 0 && state[2] > 0 && state[3] > 0) {
+        if (gui.get_display_state(display_token, state) == 0
+                && sane_dim((int)state[2]) && sane_dim((int)state[3])) {
+            orientation = state[1];
             g.width = (int)state[2];
             g.height = (int)state[3];
             got_size = true;
@@ -229,15 +240,20 @@ Geometry query_geometry(const LibGuiApi& gui, const Sp& display_token) {
         if (gui.get_active_mode) {
             uint8_t mode[256]{};
             if (gui.get_active_mode(display_token, mode) == 0) {
-                uint32_t mw = ((uint32_t*)mode)[1];
-                uint32_t mh = ((uint32_t*)mode)[2];
+                int mw = (int)((uint32_t*)mode)[1];
+                int mh = (int)((uint32_t*)mode)[2];
                 float fps = ((float*)mode)[12];
-                if (mw > 0 && mh > 0) {
-                    g.width = (int)mw;
-                    g.height = (int)mh;
+                if (sane_dim(mw) && sane_dim(mh)) {
+                    if (orientation == 1 || orientation == 3) {
+                        int tmp = mw;
+                        mw = mh;
+                        mh = tmp;
+                    }
+                    g.width = mw;
+                    g.height = mh;
                     got_size = true;
                 }
-                if (fps >= 1.0f && fps <= 1000.0f) {
+                if (fps >= 15.0f && fps <= 480.0f) {
                     g.refresh_hz = (int)lroundf(fps);
                 }
             }
@@ -533,9 +549,16 @@ int main(int argc, char** argv) {
         }
         client = gui.scc_default();
         if (client.ptr) {
-            auto ids = gui.get_phys_ids();
-            if (!ids.empty()) {
-                display_token = gui.get_phys_token(ids[0]);
+            if (gui.get_phys_ids && gui.get_phys_token) {
+                auto ids = gui.get_phys_ids();
+                if (!ids.empty()) {
+                    display_token = gui.get_phys_token(ids[0]);
+                }
+            }
+            if (!display_token.ptr && gui.get_internal_token) {
+                display_token = gui.get_internal_token();
+            }
+            if (display_token.ptr) {
                 Blob name{}, metadata{};
                 gui.str8_ctor(&name, kLayerName);
                 gui.lm_ctor(&metadata);

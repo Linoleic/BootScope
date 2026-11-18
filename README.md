@@ -28,8 +28,8 @@ adb -s <设备序列号> shell "su -c 'ksud module uninstall bootscope_probe; ks
 
 1. **采集探针（`probe.sh`）**：每轮采样 init 服务状态、首次启动时间、`ro.boottime.init.*` 阶段耗时及开机动画和启动完成属性，最多 60 次；连续 3 次检测到 `sys.boot_completed=1` 后，限时读取当前 `events` 环形缓冲（仅保存允许的框架启动事件标签与毫秒数值）以及 `dmesg` 中的脱敏 `init:` 阶段/服务启停事件（`init-events.tsv`），补齐 `0s` 到 `service.sh` 拉起前的早期启动过程。快照记录观测时刻，事件字段使用各写入方定义的时钟。
 2. **开机显示（`bootscope_early` 原生早期探针 + `display.sh` 回退）**：
-   - **早期原生路径（默认）**：安装与启动时将静态链接 C++ 运行库的原生二进制 `bootscope_early` 同步至 `/metadata/vold/ksu/bootscope_early`，并通过 KernelSU 的 `initrc/bootscope.rc` 在 `init.svc.bootanim=running`（约 2.3 秒）即刻拉起，无需等待 `/data` 解密、`derive_classpath` 或 ART 启动即可渲染到 SurfaceFlinger；自动跟踪分辨率与刷新率切换并展示 10 段早期/框架启动进度。
-   - **回退路径**：若原生早期探针未启动或使用 `--no-early` 构建，`display.sh` 在 `service.sh` 阶段自动回退到 `app_process` (`DisplayProbe.java`)。
+   - **早期原生路径（KernelSU + `arm64-v8a` 默认）**：仅在 KernelSU 环境且 `ro.product.cpu.abi=arm64-v8a` 时，安装与启动脚本才将静态链接 C++ 运行库的原生二进制 `bootscope_early` 同步至 `/metadata/vold/ksu/bootscope_early`，并通过 KernelSU 的 `initrc/bootscope.rc` 在 `on late-fs`（约 2.3 秒）即刻拉起，无需等待 `/data` 解密、`derive_classpath` 或 ART 启动即可渲染到 SurfaceFlinger；自动跟踪分辨率、旋转方向与刷新率切换并展示 10 段早期/框架启动进度。
+   - **回退与多框架兼容**：在 Magisk / APatch、非 `arm64-v8a` 设备，或 `bootscope_early` 未能成功提交首帧时，`display.sh` 会自动保存失败诊断（如有）并回退到 `app_process`（`DisplayProbe.java`，需 Android 13 / API ≥ 33；低版本记录 `mode=unsupported_sdk` 后安全退出）。
    - 如需仅关闭开机显示而保留数据采集，创建 `/data/adb/bootscope/disable_display`（或模块目录下的 `disable_display`）即可，重启后自动跳过显示探针。
 
 每次开机的输出统一保存在设备 `/data/adb/bootscope/<boot-id>/`（目录权限 0700，文件默认 0600），通过独立的 `.probe.lock` / `.display.lock` 防止同一开机周期重复运行：

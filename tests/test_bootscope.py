@@ -247,6 +247,8 @@ class PackagingAndModuleTests(unittest.TestCase):
 
         customize_sh = (ROOT / 'module' / 'customize.sh').read_text(encoding='utf-8')
         self.assertIn('bootscope_early', customize_sh)
+        self.assertIn('KSU', customize_sh)
+        self.assertIn('arm64-v8a', customize_sh)
         self.assertNotRegex(customize_sh, r'(?m)^\s*exit\b')
 
         rc = (ROOT / 'module' / 'initrc' / 'bootscope.rc').read_text(encoding='utf-8')
@@ -262,6 +264,8 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('dmesg', probe_sh)
         self.assertIn('.display.lock', display_sh)
         self.assertIn('early_native', display_sh)
+        self.assertIn('first_frame_submitted_ms=', display_sh)
+        self.assertIn('unsupported_sdk', display_sh)
 
     def test_build_module_headless_zip(self):
         subprocess.run([sys.executable, str(ROOT / 'build_module.py'), '--no-display'], check=True)

@@ -31,12 +31,18 @@ capture_compositor() {
     ' > "$RUN/display-compositor.txt"
 }
 
-# If the native early-boot display overlay already started in initrc, collect its
-# compositor snapshot and log instead of spawning a duplicate Java overlay.
+# Wait briefly if the native early-boot display is still starting up, then verify
+# it actually submitted a frame before skipping the Java fallback.
 EARLY_PID=$(cat /dev/bootscope_early.pid 2>/dev/null)
-if [ -n "$EARLY_PID" ] || [ -s /dev/bootscope_early.log ]; then
-    echo "mode=early_native" >> "$RUN/display-status.txt"
-    if [ -n "$EARLY_PID" ] && kill -0 "$EARLY_PID" 2>/dev/null; then
+if [ -n "$EARLY_PID" ] && kill -0 "$EARLY_PID" 2>/dev/null; then
+    WAIT_FIRST=0
+    while kill -0 "$EARLY_PID" 2>/dev/null \
+            && ! grep -q '^first_frame_submitted_ms=' /dev/bootscope_early.log 2>/dev/null \
+            && [ "$WAIT_FIRST" -lt 8 ]; do
+        sleep 0.25
+        WAIT_FIRST=$((WAIT_FIRST + 1))
+    done
+    if grep -q '^first_frame_submitted_ms=' /dev/bootscope_early.log 2>/dev/null; then
         capture_compositor
         WAITED=0
         while kill -0 "$EARLY_PID" 2>/dev/null && [ "$WAITED" -lt 80 ]; do
@@ -44,18 +50,34 @@ if [ -n "$EARLY_PID" ] || [ -s /dev/bootscope_early.log ]; then
             WAITED=$((WAITED + 1))
         done
     fi
-    if [ -s /dev/bootscope_early.log ]; then
-        cp -f /dev/bootscope_early.log "$RUN/display-renderer.txt" 2>/dev/null
-    fi
+fi
+
+if grep -q '^first_frame_submitted_ms=' /dev/bootscope_early.log 2>/dev/null; then
+    cp -f /dev/bootscope_early.log "$RUN/display-renderer.txt" 2>/dev/null
+    echo "mode=early_native" >> "$RUN/display-status.txt"
     echo "renderer_exit=0" >> "$RUN/display-status.txt"
     exit 0
 fi
 
-# Fallback: ART Java DisplayProbe (only when early native probe did not run).
+if [ -s /dev/bootscope_early.log ]; then
+    cp -f /dev/bootscope_early.log "$RUN/display-early-error.txt" 2>/dev/null
+fi
+
+# Fallback: ART Java DisplayProbe (requires Android 13+ / API >= 33).
+SDK=$(getprop ro.build.version.sdk 2>/dev/null)
 if [ ! -f "$MODDIR/classes.dex" ]; then
     echo "mode=none" >> "$RUN/display-status.txt"
     exit 0
 fi
+case "$SDK" in
+    ''|*[!0-9]*) ;;
+    *)
+        if [ "$SDK" -lt 33 ]; then
+            echo "mode=unsupported_sdk" >> "$RUN/display-status.txt"
+            exit 0
+        fi
+        ;;
+esac
 echo "mode=java_fallback" >> "$RUN/display-status.txt"
 
 (
