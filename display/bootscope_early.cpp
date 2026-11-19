@@ -1,6 +1,7 @@
 #include "early/boot_sources.h"
 #include "early/canvas.h"
 #include "early/common.h"
+#include "early/replay_source.h"
 #include "early/rules.h"
 #include "early/sf_gui.h"
 #include "early/sys_metrics.h"
@@ -76,6 +77,7 @@ bool reexec_from_tmp_if_needed(int argc, char** argv) {
 
 struct RenderContext {
     bool preview = false;
+    bool replay = false;
     int frame_idx = 0;
     int64_t now_ms = 0;
     double uptime_s = 0.0;
@@ -165,7 +167,10 @@ void draw_dashboard(uint32_t* px, int stride, const RenderContext& ctx) {
     fill_rect(px, stride, 0, 0, bw, bh, kColorBg);
     fill_rect(px, stride, 0, 0, 8, bh, kColorAccent);
 
-    draw_text(px, stride, ctx.preview ? "BOOTSCOPE / PREVIEW" : "BOOTSCOPE / BOOT", 24, 20, 3, kColorAccent);
+    const char* title = ctx.replay
+        ? "BOOTSCOPE / REPLAY"
+        : (ctx.preview ? "BOOTSCOPE / PREVIEW" : "BOOTSCOPE / BOOT");
+    draw_text(px, stride, title, 24, 20, 3, kColorAccent);
 
     char mode_buf[32];
     if (ctx.geom->refresh_hz > 0) {
@@ -370,8 +375,15 @@ int main(int argc, char** argv) {
     using namespace bootscope;
 
     bool preview = false;
+    bool replay_mode = false;
+    std::string replay_dir;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--preview") == 0) preview = true;
+        else if (strcmp(argv[i], "--replay") == 0 && i + 1 < argc) {
+            replay_mode = true;
+            preview = true;
+            replay_dir = argv[++i];
+        }
     }
     if (!preview && access(kDisableMarker, F_OK) == 0) {
         return 0;
@@ -472,12 +484,21 @@ int main(int argc, char** argv) {
     std::string bootloader_line = build_bootloader_line();
     init_phases(&ev_state, bootloader_line);
 
+    ReplayData replay_data;
+    if (replay_mode) {
+        if (!load_replay_data(replay_dir, &replay_data)) {
+            fprintf(logf, "exit=replay_load_failed\n");
+            return 1;
+        }
+        bootloader_line = replay_data.bl_line;
+    }
+
     pthread_t ev_thread{};
     pthread_t kmsg_thread{};
     pthread_t err_thread{};
-    bool ev_started = (pthread_create(&ev_thread, nullptr, event_reader_thread, &ev_state) == 0);
-    bool kmsg_started = (pthread_create(&kmsg_thread, nullptr, kmsg_reader_thread, &ev_state) == 0);
-    bool err_started = (pthread_create(&err_thread, nullptr, err_reader_thread, &ev_state) == 0);
+    bool ev_started = !replay_mode && (pthread_create(&ev_thread, nullptr, event_reader_thread, &ev_state) == 0);
+    bool kmsg_started = !replay_mode && (pthread_create(&kmsg_thread, nullptr, kmsg_reader_thread, &ev_state) == 0);
+    bool err_started = !replay_mode && (pthread_create(&err_thread, nullptr, err_reader_thread, &ev_state) == 0);
 
     const char* watched[] = {
         "surfaceflinger", "bootanim", "zygote", "apexd", "artd",
@@ -503,8 +524,9 @@ int main(int argc, char** argv) {
 
     int64_t loop_start = boottime_ms();
     bool saw_bootanim = false;
-    int64_t deadline = loop_start + (preview ? 4000 : 30000);
-    while (boottime_ms() < deadline) {
+    constexpr int kReplayTotalFrames = 45;
+    int64_t deadline = loop_start + (replay_mode ? 15000 : (preview ? 4000 : 30000));
+    while (replay_mode ? (frame_idx <= kReplayTotalFrames) : (boottime_ms() < deadline)) {
         if (!preview) {
             if (get_prop("init.svc.bootanim") == "running") saw_bootanim = true;
             if (get_prop("service.bootanim.exit") == "1" || get_prop("sys.boot_completed") == "1") {
@@ -536,40 +558,12 @@ int main(int argc, char** argv) {
             has_geom = true;
         }
 
-        int64_t now_ms = boottime_ms();
+        int64_t now_ms = replay_mode
+            ? (replay_data.end_ms * frame_idx / kReplayTotalFrames)
+            : boottime_ms();
         double uptime_s = now_ms / 1000.0;
         std::string cur_states[kSvcCount];
-        for (int i = 0; i < 9; i++) {
-            cur_states[i] = svc_state(watched[i]);
-            if (cur_states[i] == "RUN" && svc_start_ms[i] < 0) svc_start_ms[i] = now_ms;
-            if (!first && prev_states[i] != cur_states[i]) {
-                char tbuf[64];
-                snprintf(tbuf, sizeof(tbuf), "+%.2fS %s %s>%s",
-                         uptime_s, short_names[i], prev_states[i].c_str(), cur_states[i].c_str());
-                last_transition = tbuf;
-                push_tail(&ev_state, now_ms, "S", TailKind::Stage,
-                          std::string(short_names[i]) + " " + prev_states[i] + ">" + cur_states[i]);
-            }
-            prev_states[i] = cur_states[i];
-        }
-
-        PsiSample cur_psi[3];
-        read_psi_file("/proc/pressure/cpu", &cur_psi[0]);
-        read_psi_file("/proc/pressure/io", &cur_psi[1]);
-        read_psi_file("/proc/pressure/memory", &cur_psi[2]);
-        int64_t dt_ms = prev_psi_ms > 0 ? (now_ms - prev_psi_ms) : 0;
-        int cpu_pct = compute_psi_pct(cur_psi[0], prev_psi[0], dt_ms);
-        int io_pct = compute_psi_pct(cur_psi[1], prev_psi[1], dt_ms);
-        int mem_pct = compute_psi_pct(cur_psi[2], prev_psi[2], dt_ms);
-        for (int i = 0; i < 3; i++) prev_psi[i] = cur_psi[i];
-        prev_psi_ms = now_ms;
-        if (first && !cur_psi[0].valid) {
-            push_tail(&ev_state, now_ms, "M", TailKind::ModuleError, "ERR PSI UNAVAIL", "MOD:PSI");
-        }
-        if ((frame_idx % 2) == 0) {
-            sys_metrics = collect_sys_metrics(now_ms, &sys_state);
-        }
-
+        int cpu_pct = -1, io_pct = -1, mem_pct = -1;
         StageInfo stage;
         PhaseNode phases_snap[6];
         std::string wait_svc;
@@ -581,56 +575,103 @@ int main(int argc, char** argv) {
         size_t active_cnt = 0;
         std::vector<TailEntry> visible_tail;
         size_t max_rows = (canvas_width() == kLandWidth) ? kMaxTailRows : 11;
-        {
-            std::lock_guard<std::mutex> lock(ev_state.mu);
-            if (cur_states[2] == "RUN" && ev_state.phases[1].state == NodeState::Running) {
-                ev_state.phases[1].state = NodeState::Done;
-                ev_state.phases[1].end_ms = now_ms;
-                if (ev_state.phases[2].state == NodeState::Pending) {
-                    ev_state.phases[2].state = NodeState::Running;
-                    ev_state.phases[2].start_ms = now_ms;
-                }
-            }
-            if (!ev_state.last_init_action.empty() || !ev_state.max_init_svc.empty()) {
-                std::string init_det;
-                if (!ev_state.last_init_action.empty()) {
-                    init_det = "ACT:" + short_init_action(ev_state.last_init_action);
-                }
-                if (!ev_state.max_init_svc.empty()) {
-                    char mbuf[32];
-                    snprintf(mbuf, sizeof(mbuf), "MAX:%s %.2fS",
-                             ev_state.max_init_svc.c_str(), ev_state.max_init_dur_ms / 1000.0);
-                    if (!init_det.empty()) init_det += " ";
-                    init_det += mbuf;
-                }
-                ev_state.phases[1].detail = init_det;
-            }
-            for (int i = 0; i < 6; i++) phases_snap[i] = ev_state.phases[i];
-            for (const auto& a : ev_state.active_svcs) {
-                int64_t d = now_ms - a.start_ms;
-                if (d > wait_dur_ms) {
-                    wait_dur_ms = d;
-                    wait_svc = a.name;
-                }
-            }
-            active_cnt = ev_state.active_svcs.size();
-            last_action = ev_state.last_init_action;
-            max_init_svc = ev_state.max_init_svc;
-            max_init_dur_ms = ev_state.max_init_dur_ms;
-            init_ms_snap = ev_state.init_milestones;
-            stage = ev_state.framework_stage;
-            size_t total = ev_state.tail.size();
+
+        if (replay_mode) {
+            std::vector<TailEntry> full_tail;
+            build_replay_snapshot(
+                replay_data, now_ms, ev_state.rules, short_names, kSvcCount,
+                phases_snap, &stage, &init_ms_snap, &last_action,
+                &max_init_svc, &max_init_dur_ms, &wait_svc, &wait_dur_ms, &active_cnt,
+                cur_states, svc_start_ms, &cpu_pct, &io_pct, &mem_pct,
+                &sys_metrics, &full_tail, &last_transition);
+            size_t total = full_tail.size();
             size_t start_idx = total > max_rows ? (total - max_rows) : 0;
             for (size_t i = start_idx; i < total; i++) {
-                visible_tail.push_back(ev_state.tail[i]);
+                visible_tail.push_back(std::move(full_tail[i]));
             }
+        } else {
+            for (int i = 0; i < 9; i++) {
+                cur_states[i] = svc_state(watched[i]);
+                if (cur_states[i] == "RUN" && svc_start_ms[i] < 0) svc_start_ms[i] = now_ms;
+                if (!first && prev_states[i] != cur_states[i]) {
+                    char tbuf[64];
+                    snprintf(tbuf, sizeof(tbuf), "+%.2fS %s %s>%s",
+                             uptime_s, short_names[i], prev_states[i].c_str(), cur_states[i].c_str());
+                    last_transition = tbuf;
+                    push_tail(&ev_state, now_ms, "S", TailKind::Stage,
+                              std::string(short_names[i]) + " " + prev_states[i] + ">" + cur_states[i]);
+                }
+                prev_states[i] = cur_states[i];
+            }
+
+            PsiSample cur_psi[3];
+            read_psi_file("/proc/pressure/cpu", &cur_psi[0]);
+            read_psi_file("/proc/pressure/io", &cur_psi[1]);
+            read_psi_file("/proc/pressure/memory", &cur_psi[2]);
+            int64_t dt_ms = prev_psi_ms > 0 ? (now_ms - prev_psi_ms) : 0;
+            cpu_pct = compute_psi_pct(cur_psi[0], prev_psi[0], dt_ms);
+            io_pct = compute_psi_pct(cur_psi[1], prev_psi[1], dt_ms);
+            mem_pct = compute_psi_pct(cur_psi[2], prev_psi[2], dt_ms);
+            for (int i = 0; i < 3; i++) prev_psi[i] = cur_psi[i];
+            prev_psi_ms = now_ms;
+            if (first && !cur_psi[0].valid) {
+                push_tail(&ev_state, now_ms, "M", TailKind::ModuleError, "ERR PSI UNAVAIL", "MOD:PSI");
+            }
+            if ((frame_idx % 2) == 0) {
+                sys_metrics = collect_sys_metrics(now_ms, &sys_state);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(ev_state.mu);
+                if (cur_states[2] == "RUN" && ev_state.phases[1].state == NodeState::Running) {
+                    ev_state.phases[1].state = NodeState::Done;
+                    ev_state.phases[1].end_ms = now_ms;
+                    if (ev_state.phases[2].state == NodeState::Pending) {
+                        ev_state.phases[2].state = NodeState::Running;
+                        ev_state.phases[2].start_ms = now_ms;
+                    }
+                }
+                if (!ev_state.last_init_action.empty() || !ev_state.max_init_svc.empty()) {
+                    std::string init_det;
+                    if (!ev_state.last_init_action.empty()) {
+                        init_det = "ACT:" + short_init_action(ev_state.last_init_action);
+                    }
+                    if (!ev_state.max_init_svc.empty()) {
+                        char mbuf[32];
+                        snprintf(mbuf, sizeof(mbuf), "MAX:%s %.2fS",
+                                 ev_state.max_init_svc.c_str(), ev_state.max_init_dur_ms / 1000.0);
+                        if (!init_det.empty()) init_det += " ";
+                        init_det += mbuf;
+                    }
+                    ev_state.phases[1].detail = init_det;
+                }
+                for (int i = 0; i < 6; i++) phases_snap[i] = ev_state.phases[i];
+                for (const auto& a : ev_state.active_svcs) {
+                    int64_t d = now_ms - a.start_ms;
+                    if (d > wait_dur_ms) {
+                        wait_dur_ms = d;
+                        wait_svc = a.name;
+                    }
+                }
+                active_cnt = ev_state.active_svcs.size();
+                last_action = ev_state.last_init_action;
+                max_init_svc = ev_state.max_init_svc;
+                max_init_dur_ms = ev_state.max_init_dur_ms;
+                init_ms_snap = ev_state.init_milestones;
+                stage = ev_state.framework_stage;
+                size_t total = ev_state.tail.size();
+                size_t start_idx = total > max_rows ? (total - max_rows) : 0;
+                for (size_t i = start_idx; i < total; i++) {
+                    visible_tail.push_back(ev_state.tail[i]);
+                }
+            }
+            if (stage.step == 0) {
+                stage = infer_native_stage(cur_states[3], cur_states[2]);
+            }
+            cur_states[9] = (stage.step >= 4) ? "RUN" : "-";
+            if (cur_states[9] == "RUN" && svc_start_ms[9] < 0) svc_start_ms[9] = now_ms;
+            prev_states[9] = cur_states[9];
         }
-        if (stage.step == 0) {
-            stage = infer_native_stage(cur_states[3], cur_states[2]);
-        }
-        cur_states[9] = (stage.step >= 4) ? "RUN" : "-";
-        if (cur_states[9] == "RUN" && svc_start_ms[9] < 0) svc_start_ms[9] = now_ms;
-        prev_states[9] = cur_states[9];
 
         int expanded_idx = -1;
         for (int i = 5; i >= 0; i--) {
@@ -737,6 +778,7 @@ int main(int argc, char** argv) {
 
         RenderContext ctx;
         ctx.preview = preview;
+        ctx.replay = replay_mode;
         ctx.frame_idx = frame_idx;
         ctx.now_ms = now_ms;
         ctx.uptime_s = uptime_s;
@@ -777,10 +819,13 @@ int main(int argc, char** argv) {
             first = false;
         }
         frame_idx++;
-        usleep(250000);
+        usleep(replay_mode ? 150000 : 250000);
     }
 
-    if (boottime_ms() >= deadline) {
+    if (replay_mode) {
+        usleep(1000000);
+        fprintf(logf, "exit=replay_done\n");
+    } else if (boottime_ms() >= deadline) {
         fprintf(logf, "exit=time_limit\n");
     }
 

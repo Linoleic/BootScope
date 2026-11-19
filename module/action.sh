@@ -21,6 +21,12 @@ fi
 echo "=== BootScope Last Boot Replay ==="
 echo "dir=$RUN_DIR"
 
+MODDIR=${0%/*}
+if [ -x "$MODDIR/bootscope_early" ] && [ "$1" != "--text-only" ]; then
+    echo "Launching BootScope overlay replay..."
+    "$MODDIR/bootscope_early" --replay "$RUN_DIR"
+fi
+
 if [ -f "$RUN_DIR/metadata.txt" ]; then
     echo ""
     echo "[Metadata]"
