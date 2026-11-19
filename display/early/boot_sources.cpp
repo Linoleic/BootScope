@@ -1,5 +1,6 @@
 #include "early/boot_sources.h"
 #include "early/common.h"
+#include "early/early_trace.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -63,6 +64,12 @@ void push_tail(
         const std::string& raw_text, const std::string& group) {
     std::string text = sanitize_tail_text(st->rules, raw_text, kTailLineChars - 8);
     if (text.empty()) return;
+
+    const char* kind_str = "INFO";
+    if (kind == TailKind::Stage) kind_str = "STAGE";
+    else if (kind == TailKind::Error) kind_str = "ERR";
+    else if (kind == TailKind::ModuleError) kind_str = "MERR";
+    trace_tail(ts_ms, source, kind_str, text);
 
     std::lock_guard<std::mutex> lock(st->mu);
     for (auto& existing : st->tail) {
@@ -171,6 +178,7 @@ static void update_qcom_kpi_locked(EventState* st) {
                      (long long)total_ms, (unsigned long long)k.mpm_freq);
         }
         st->phases[0].detail = buf;
+        trace_bl(0, buf, total_ms);
     } else {
         char buf[64];
         snprintf(buf, sizeof(buf), "QCOM KPI TICKS:%llu", (unsigned long long)total_ticks);

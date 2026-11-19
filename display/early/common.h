@@ -23,6 +23,7 @@ constexpr const char* kModuleRulesPath = "/data/adb/modules/bootscope/rules.conf
 constexpr const char* kTmpExecPath = "/tmp/bootscope_early";
 constexpr const char* kPidPath = "/dev/bootscope_early.pid";
 constexpr const char* kLogPath = "/dev/bootscope_early.log";
+constexpr const char* kEarlyTracePath = "/dev/bootscope_early_trace.tsv";
 
 int64_t boottime_ms();
 std::string get_prop(const char* name);

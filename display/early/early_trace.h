@@ -1,0 +1,21 @@
+#pragma once
+
+#include "early/sys_metrics.h"
+
+#include <stdint.h>
+#include <string>
+
+namespace bootscope {
+
+void trace_open();
+void trace_close();
+bool trace_is_open();
+
+void trace_life(int64_t ts_ms, const char* event, const std::string& detail = "");
+void trace_bl(int64_t ts_ms, const std::string& bl_line, int64_t total_ms);
+void trace_tail(int64_t ts_ms, const char* source, const char* kind, const std::string& text);
+void trace_metric(
+    int64_t ts_ms, int cpu_pct, int io_pct, int mem_pct,
+    const SysMetrics& sys, const std::string* cur_states, int svc_count);
+
+}  // namespace bootscope

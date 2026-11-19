@@ -1,6 +1,7 @@
 #include "early/boot_sources.h"
 #include "early/canvas.h"
 #include "early/common.h"
+#include "early/early_trace.h"
 #include "early/replay_source.h"
 #include "early/rules.h"
 #include "early/sf_gui.h"
@@ -398,12 +399,73 @@ int main(int argc, char** argv) {
 
     if (!preview) {
         write_pid_file();
-        fprintf(logf, "started_ms=%lld\n", (long long)boottime_ms());
+        int64_t start_ms = boottime_ms();
+        fprintf(logf, "started_ms=%lld\n", (long long)start_ms);
+        trace_open();
+        trace_life(start_ms, "started");
     }
+
+    EventState ev_state;
+    load_rules(&ev_state.rules);
+    DeviceInfo dev_info = collect_device_info(ev_state.rules);
+    std::string bootloader_line = build_bootloader_line();
+    init_phases(&ev_state, bootloader_line);
+    if (!preview && !replay_mode) {
+        trace_bl(boottime_ms(), bootloader_line, -1);
+    }
+
+    ReplayData replay_data;
+    if (replay_mode) {
+        if (!load_replay_data(replay_dir, &replay_data)) {
+            fprintf(logf, "exit=replay_load_failed\n");
+            return 1;
+        }
+        bootloader_line = replay_data.bl_line;
+    }
+
+    pthread_t ev_thread{};
+    pthread_t kmsg_thread{};
+    pthread_t err_thread{};
+    bool ev_started = !replay_mode && (pthread_create(&ev_thread, nullptr, event_reader_thread, &ev_state) == 0);
+    bool kmsg_started = !replay_mode && (pthread_create(&kmsg_thread, nullptr, kmsg_reader_thread, &ev_state) == 0);
+    bool err_started = !replay_mode && (pthread_create(&err_thread, nullptr, err_reader_thread, &ev_state) == 0);
+    auto stop_threads = [&]() {
+        ev_state.stop = true;
+        {
+            std::lock_guard<std::mutex> lock(ev_state.mu);
+            if (ev_state.logcat_pid > 0) kill(ev_state.logcat_pid, SIGKILL);
+            if (ev_state.err_logcat_pid > 0) kill(ev_state.err_logcat_pid, SIGKILL);
+        }
+        if (ev_started) pthread_join(ev_thread, nullptr);
+        if (kmsg_started) pthread_join(kmsg_thread, nullptr);
+        if (err_started) pthread_join(err_thread, nullptr);
+        ev_started = kmsg_started = err_started = false;
+    };
+
+    const char* watched[] = {
+        "surfaceflinger", "bootanim", "zygote", "apexd", "artd",
+        "wpa_supplicant", "vold", "keystore2", "installd", "system_server"
+    };
+    const char* short_names[] = {
+        "SF", "ANIM", "ZYG", "APEX", "ARTD",
+        "WPA", "VOLD", "KST2", "INST", "SYS"
+    };
+    constexpr int kSvcCount = 10;
+    std::string prev_states[kSvcCount];
+    int64_t svc_start_ms[kSvcCount];
+    for (int i = 0; i < kSvcCount; i++) svc_start_ms[i] = -1;
+    std::string last_transition = "WAITING TRANSITIONS";
+    PsiSample prev_psi[3];
+    int64_t prev_psi_ms = 0;
+    SysSampleState sys_state;
+    SysMetrics sys_metrics;
 
     LibGuiApi gui;
     if (!gui.load()) {
         fprintf(logf, "exit=libgui_load_failed\n");
+        trace_life(boottime_ms(), "exit", "libgui_load_failed");
+        stop_threads();
+        trace_close();
         if (!preview) {
             unlink(kPidPath);
             unlink(kTmpExecPath);
@@ -421,15 +483,42 @@ int main(int argc, char** argv) {
     Sp surf;
     ANativeWindow* anw = nullptr;
     int64_t sf_deadline = boottime_ms() + 8000;
+    int sf_wait_tick = 0;
     while (boottime_ms() < sf_deadline) {
         if (!preview && (get_prop("sys.boot_completed") == "1" || get_prop("service.bootanim.exit") == "1")) {
             fprintf(logf, "exit=boot_already_completed\n");
+            trace_life(boottime_ms(), "exit", "boot_already_completed");
+            stop_threads();
+            trace_close();
             if (!preview) {
                 unlink(kPidPath);
                 unlink(kTmpExecPath);
             }
             return 0;
         }
+        if (!preview && !replay_mode && (sf_wait_tick % 5) == 0) {
+            int64_t t_ms = boottime_ms();
+            std::string pre_svcs[kSvcCount];
+            for (int i = 0; i < 9; i++) {
+                pre_svcs[i] = svc_state(watched[i]);
+                if (pre_svcs[i] == "RUN" && svc_start_ms[i] < 0) svc_start_ms[i] = t_ms;
+            }
+            pre_svcs[9] = "-";
+            PsiSample cur_psi[3];
+            read_psi_file("/proc/pressure/cpu", &cur_psi[0]);
+            read_psi_file("/proc/pressure/io", &cur_psi[1]);
+            read_psi_file("/proc/pressure/memory", &cur_psi[2]);
+            int64_t dt_ms = prev_psi_ms > 0 ? (t_ms - prev_psi_ms) : 0;
+            int c_pct = compute_psi_pct(cur_psi[0], prev_psi[0], dt_ms);
+            int i_pct = compute_psi_pct(cur_psi[1], prev_psi[1], dt_ms);
+            int m_pct = compute_psi_pct(cur_psi[2], prev_psi[2], dt_ms);
+            for (int i = 0; i < 3; i++) prev_psi[i] = cur_psi[i];
+            prev_psi_ms = t_ms;
+            sys_metrics = collect_sys_metrics(t_ms, &sys_state);
+            trace_metric(t_ms, c_pct, i_pct, m_pct, sys_metrics, pre_svcs, kSvcCount);
+        }
+        sf_wait_tick++;
+
         client = gui.scc_default();
         if (client.ptr) {
             if (gui.get_phys_ids && gui.get_phys_token) {
@@ -460,7 +549,10 @@ int main(int argc, char** argv) {
                     surf = gui.sc_get_surface(sc.ptr);
                     if (surf.ptr) {
                         anw = extract_anw(surf.ptr);
-                        if (anw) break;
+                        if (anw) {
+                            trace_life(boottime_ms(), "sf_ready");
+                            break;
+                        }
                     }
                 }
             }
@@ -471,6 +563,9 @@ int main(int argc, char** argv) {
     if (!anw) {
         fprintf(logf, "exit=surface_unavailable client=%p token=%p sc=%p surf=%p\n",
                 client.ptr, display_token.ptr, sc.ptr, surf.ptr);
+        trace_life(boottime_ms(), "exit", "surface_unavailable");
+        stop_threads();
+        trace_close();
         if (!preview) {
             unlink(kPidPath);
             unlink(kTmpExecPath);
@@ -478,45 +573,6 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    EventState ev_state;
-    load_rules(&ev_state.rules);
-    DeviceInfo dev_info = collect_device_info(ev_state.rules);
-    std::string bootloader_line = build_bootloader_line();
-    init_phases(&ev_state, bootloader_line);
-
-    ReplayData replay_data;
-    if (replay_mode) {
-        if (!load_replay_data(replay_dir, &replay_data)) {
-            fprintf(logf, "exit=replay_load_failed\n");
-            return 1;
-        }
-        bootloader_line = replay_data.bl_line;
-    }
-
-    pthread_t ev_thread{};
-    pthread_t kmsg_thread{};
-    pthread_t err_thread{};
-    bool ev_started = !replay_mode && (pthread_create(&ev_thread, nullptr, event_reader_thread, &ev_state) == 0);
-    bool kmsg_started = !replay_mode && (pthread_create(&kmsg_thread, nullptr, kmsg_reader_thread, &ev_state) == 0);
-    bool err_started = !replay_mode && (pthread_create(&err_thread, nullptr, err_reader_thread, &ev_state) == 0);
-
-    const char* watched[] = {
-        "surfaceflinger", "bootanim", "zygote", "apexd", "artd",
-        "wpa_supplicant", "vold", "keystore2", "installd", "system_server"
-    };
-    const char* short_names[] = {
-        "SF", "ANIM", "ZYG", "APEX", "ARTD",
-        "WPA", "VOLD", "KST2", "INST", "SYS"
-    };
-    constexpr int kSvcCount = 10;
-    std::string prev_states[kSvcCount];
-    int64_t svc_start_ms[kSvcCount];
-    for (int i = 0; i < kSvcCount; i++) svc_start_ms[i] = -1;
-    std::string last_transition = "WAITING TRANSITIONS";
-    PsiSample prev_psi[3];
-    int64_t prev_psi_ms = 0;
-    SysSampleState sys_state;
-    SysMetrics sys_metrics;
     Geometry last_geom;
     bool has_geom = false;
     bool first = true;
@@ -531,10 +587,12 @@ int main(int argc, char** argv) {
             if (get_prop("init.svc.bootanim") == "running") saw_bootanim = true;
             if (get_prop("service.bootanim.exit") == "1" || get_prop("sys.boot_completed") == "1") {
                 fprintf(logf, "exit=animation_ended\n");
+                trace_life(boottime_ms(), "exit", "animation_ended");
                 break;
             }
             if ((saw_bootanim || boottime_ms() - loop_start > 4000) && !animation_active()) {
                 fprintf(logf, "exit=animation_ended\n");
+                trace_life(boottime_ms(), "exit", "animation_ended");
                 break;
             }
         }
@@ -550,10 +608,12 @@ int main(int argc, char** argv) {
             if (first) gui.tx_show(&tx, sc);
             gui.tx_apply(&tx, false, false);
 
-            fprintf(logf, "%s%dx%d@%d rot=%d pos=%d,%d scale=%.3f\n",
-                    has_geom ? "layout_changed=" : "layout=",
-                    geom.width, geom.height, geom.refresh_hz, geom.rot_quad,
-                    (int)lroundf(geom.pos_x), (int)lroundf(geom.pos_y), geom.scale);
+            char lbuf[96];
+            snprintf(lbuf, sizeof(lbuf), "%dx%d@%d rot=%d pos=%d,%d scale=%.3f",
+                     geom.width, geom.height, geom.refresh_hz, geom.rot_quad,
+                     (int)lroundf(geom.pos_x), (int)lroundf(geom.pos_y), geom.scale);
+            fprintf(logf, "%s%s\n", has_geom ? "layout_changed=" : "layout=", lbuf);
+            trace_life(boottime_ms(), has_geom ? "layout_changed" : "layout", lbuf);
             last_geom = geom;
             has_geom = true;
         }
@@ -814,8 +874,14 @@ int main(int argc, char** argv) {
             ANativeWindow_unlockAndPost(anw);
         }
 
+        if (!replay_mode && (frame_idx % 2) == 0) {
+            trace_metric(now_ms, cpu_pct, io_pct, mem_pct, sys_metrics, cur_states, kSvcCount);
+        }
+
         if (first) {
-            fprintf(logf, "first_frame_submitted_ms=%lld\n", (long long)boottime_ms());
+            int64_t ff_ms = boottime_ms();
+            fprintf(logf, "first_frame_submitted_ms=%lld\n", (long long)ff_ms);
+            trace_life(ff_ms, "first_frame");
             first = false;
         }
         frame_idx++;
@@ -827,17 +893,10 @@ int main(int argc, char** argv) {
         fprintf(logf, "exit=replay_done\n");
     } else if (boottime_ms() >= deadline) {
         fprintf(logf, "exit=time_limit\n");
+        trace_life(boottime_ms(), "exit", "time_limit");
     }
 
-    ev_state.stop = true;
-    {
-        std::lock_guard<std::mutex> lock(ev_state.mu);
-        if (ev_state.logcat_pid > 0) kill(ev_state.logcat_pid, SIGKILL);
-        if (ev_state.err_logcat_pid > 0) kill(ev_state.err_logcat_pid, SIGKILL);
-    }
-    if (ev_started) pthread_join(ev_thread, nullptr);
-    if (kmsg_started) pthread_join(kmsg_thread, nullptr);
-    if (err_started) pthread_join(err_thread, nullptr);
+    stop_threads();
 
     if (gui.tx_hide && sc.ptr) {
         Blob tx{};
@@ -845,7 +904,10 @@ int main(int argc, char** argv) {
         gui.tx_hide(&tx, sc);
         gui.tx_apply(&tx, true, false);
     }
-    fprintf(logf, "released_ms=%lld\n", (long long)boottime_ms());
+    int64_t rel_ms = boottime_ms();
+    fprintf(logf, "released_ms=%lld\n", (long long)rel_ms);
+    trace_life(rel_ms, "released");
+    trace_close();
     if (!preview) {
         unlink(kPidPath);
         unlink(kTmpExecPath);

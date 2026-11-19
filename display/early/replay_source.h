@@ -52,11 +52,33 @@ struct ReplaySvcPoint {
     std::string states[10];
 };
 
+struct ReplayTraceTail {
+    int64_t ts_ms = 0;
+    std::string source;
+    TailKind kind = TailKind::Info;
+    std::string text;
+};
+
+struct ReplayTraceMetric {
+    int64_t ts_ms = 0;
+    int cpu_pct = -1;
+    int io_pct = -1;
+    int mem_pct = -1;
+    std::string freq_line;
+    std::string mem_line;
+    std::string io_line;
+    std::vector<TopProc> top_cpu;
+    std::string svc_states[10];
+};
+
 struct ReplayData {
     bool loaded = false;
+    bool has_trace = false;
     int64_t end_ms = 20000;
     std::string bl_line = "BOOTLOADER TIMING N/A";
     int64_t bl_total_ms = -1;
+    std::vector<ReplayTraceTail> trace_tails;
+    std::vector<ReplayTraceMetric> trace_metrics;
     std::vector<ReplayInitEv> init_events;
     std::vector<ReplayBootEv> boot_events;
     std::vector<ReplayPsiPoint> psi_points;

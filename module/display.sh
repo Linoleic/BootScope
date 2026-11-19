@@ -52,6 +52,10 @@ if [ -n "$EARLY_PID" ] && kill -0 "$EARLY_PID" 2>/dev/null; then
     fi
 fi
 
+if [ -s /dev/bootscope_early_trace.tsv ]; then
+    cp -f /dev/bootscope_early_trace.tsv "$RUN/early-trace.tsv" 2>/dev/null
+fi
+
 if grep -q '^first_frame_submitted_ms=' /dev/bootscope_early.log 2>/dev/null; then
     cp -f /dev/bootscope_early.log "$RUN/display-renderer.txt" 2>/dev/null
     echo "mode=early_native" >> "$RUN/display-status.txt"

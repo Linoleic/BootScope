@@ -194,9 +194,83 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
         fclose(f);
     }
 
+    if (FILE* f = fopen(join_path(dir, "early-trace.tsv").c_str(), "r")) {
+        char line[1024];
+        while (fgets(line, sizeof(line), f)) {
+            if (line[0] == '#') continue;
+            std::string s(line);
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+            if (s.empty()) continue;
+            std::vector<std::string> cols;
+            size_t pos = 0;
+            while (true) {
+                size_t tab = s.find('\t', pos);
+                if (tab == std::string::npos) {
+                    cols.push_back(s.substr(pos));
+                    break;
+                }
+                cols.push_back(s.substr(pos, tab - pos));
+                pos = tab + 1;
+            }
+            if (cols.size() < 3) continue;
+            int64_t ts_ms = strtoll(cols[0].c_str(), nullptr, 10);
+            if (ts_ms / 1000.0 > max_sec) max_sec = ts_ms / 1000.0;
+            const std::string& rtype = cols[1];
+            if (rtype == "BL" && cols.size() >= 4) {
+                int64_t bms = strtoll(cols[2].c_str(), nullptr, 10);
+                if (bms >= 0) out->bl_total_ms = bms;
+                if (!cols[3].empty()) out->bl_line = cols[3];
+            } else if (rtype == "TAIL" && cols.size() >= 5) {
+                ReplayTraceTail tt;
+                tt.ts_ms = ts_ms;
+                tt.source = cols[2];
+                if (cols[3] == "STAGE") tt.kind = TailKind::Stage;
+                else if (cols[3] == "ERR") tt.kind = TailKind::Error;
+                else if (cols[3] == "MERR") tt.kind = TailKind::ModuleError;
+                else tt.kind = TailKind::Info;
+                tt.text = cols[4];
+                out->trace_tails.push_back(std::move(tt));
+            } else if (rtype == "METRIC" && cols.size() >= 8) {
+                ReplayTraceMetric tm;
+                tm.ts_ms = ts_ms;
+                sscanf(cols[2].c_str(), "%d,%d,%d", &tm.cpu_pct, &tm.io_pct, &tm.mem_pct);
+                tm.freq_line = cols[3];
+                tm.mem_line = cols[4];
+                tm.io_line = cols[5];
+                if (cols[6] != "-") {
+                    size_t p = 0;
+                    while (p < cols[6].size()) {
+                        size_t comma = cols[6].find(',', p);
+                        std::string item = (comma == std::string::npos) ? cols[6].substr(p) : cols[6].substr(p, comma - p);
+                        size_t colon = item.rfind(':');
+                        if (colon != std::string::npos) {
+                            tm.top_cpu.push_back({0, item.substr(0, colon), atof(item.substr(colon + 1).c_str())});
+                        }
+                        if (comma == std::string::npos) break;
+                        p = comma + 1;
+                    }
+                }
+                for (int i = 0; i < 10; i++) tm.svc_states[i] = "-";
+                {
+                    size_t p = 0;
+                    int idx = 0;
+                    while (p < cols[7].size() && idx < 10) {
+                        size_t comma = cols[7].find(',', p);
+                        tm.svc_states[idx++] = (comma == std::string::npos) ? cols[7].substr(p) : cols[7].substr(p, comma - p);
+                        if (comma == std::string::npos) break;
+                        p = comma + 1;
+                    }
+                }
+                out->trace_metrics.push_back(std::move(tm));
+            }
+        }
+        fclose(f);
+        out->has_trace = !out->trace_tails.empty() || !out->trace_metrics.empty();
+    }
+
     out->end_ms = (int64_t)llround(max_sec * 1000.0);
     if (out->end_ms < 5000) out->end_ms = 5000;
-    out->loaded = !out->init_events.empty() || !out->boot_events.empty() || !out->svc_points.empty();
+    out->loaded = out->has_trace || !out->init_events.empty() || !out->boot_events.empty() || !out->svc_points.empty();
     return out->loaded;
 }
 
@@ -338,6 +412,61 @@ void build_replay_snapshot(
             }
             push_replay_tail(bev.ts_ms, "P", TailKind::Stage, next.label);
         }
+    }
+
+    if (rd.has_trace && !rd.trace_tails.empty()) {
+        tail_out->clear();
+        uint64_t tseq = 1;
+        for (const auto& tt : rd.trace_tails) {
+            if (tt.ts_ms > sim_ms) break;
+            TailEntry e;
+            e.ts_ms = tt.ts_ms;
+            e.seq = tseq++;
+            e.source = tt.source;
+            e.text = tt.text;
+            e.kind = tt.kind;
+            tail_out->push_back(std::move(e));
+        }
+    }
+
+    if (rd.has_trace && !rd.trace_metrics.empty()) {
+        for (int i = 0; i < svc_count; i++) {
+            cur_states_out[i] = "-";
+            svc_start_ms_out[i] = -1;
+        }
+        *last_transition_out = "REPLAY TRACE";
+        const ReplayTraceMetric* last_tm = nullptr;
+        for (const auto& tm : rd.trace_metrics) {
+            if (tm.ts_ms > sim_ms) break;
+            last_tm = &tm;
+            for (int i = 0; i < svc_count && i < 10; i++) {
+                if (cur_states_out[i] != tm.svc_states[i]) {
+                    char tb[64];
+                    snprintf(tb, sizeof(tb), "+%.2fS %s %s>%s",
+                             tm.ts_ms / 1000.0, short_names[i], cur_states_out[i].c_str(), tm.svc_states[i].c_str());
+                    *last_transition_out = tb;
+                    cur_states_out[i] = tm.svc_states[i];
+                    if (cur_states_out[i] == "RUN" && svc_start_ms_out[i] < 0) {
+                        svc_start_ms_out[i] = tm.ts_ms;
+                    }
+                }
+            }
+        }
+        if (last_tm) {
+            *cpu_pct_out = last_tm->cpu_pct;
+            *io_pct_out = last_tm->io_pct;
+            *mem_pct_out = last_tm->mem_pct;
+            *sys_out = SysMetrics{};
+            sys_out->freq_line = last_tm->freq_line;
+            sys_out->mem_line = last_tm->mem_line;
+            sys_out->io_line = last_tm->io_line;
+            sys_out->top_cpu = last_tm->top_cpu;
+        }
+        std::sort(tail_out->begin(), tail_out->end(), [](const TailEntry& a, const TailEntry& b) {
+            if (a.ts_ms != b.ts_ms) return a.ts_ms < b.ts_ms;
+            return a.seq < b.seq;
+        });
+        return;
     }
 
     for (int i = 0; i < svc_count; i++) {
