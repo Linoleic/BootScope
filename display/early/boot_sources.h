@@ -1,0 +1,104 @@
+#pragma once
+
+#include "early/rules.h"
+
+#include <stdint.h>
+#include <sys/types.h>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace bootscope {
+
+struct StageInfo {
+    int step = 0;
+    std::string label = "EARLY_BOOT";
+    std::string raw_ms;
+};
+
+enum class TailKind {
+    Info,
+    Stage,
+    Error,
+    ModuleError,
+};
+
+struct TailEntry {
+    int64_t ts_ms = 0;
+    uint64_t seq = 0;
+    std::string source;
+    std::string group;
+    std::string text;
+    TailKind kind = TailKind::Info;
+};
+
+enum class NodeState {
+    Pending,
+    Running,
+    Done,
+};
+
+struct PhaseNode {
+    const char* id = "";
+    NodeState state = NodeState::Pending;
+    int64_t start_ms = -1;
+    int64_t end_ms = -1;
+    std::string detail;
+};
+
+struct ActiveService {
+    std::string name;
+    int64_t start_ms = 0;
+};
+
+struct QcomKpi {
+    bool has_start = false;
+    bool has_end = false;
+    bool has_load = false;
+    bool has_kernel = false;
+    bool has_freq = false;
+    uint64_t bl_start = 0;
+    uint64_t bl_end = 0;
+    uint64_t bl_load_kernel = 0;
+    uint64_t kernel_mpm = 0;
+    uint64_t mpm_freq = 0;
+};
+
+struct EventState {
+    std::mutex mu;
+    RuleSet rules;
+    StageInfo framework_stage;
+    PhaseNode phases[6];
+    QcomKpi qcom_kpi;
+    std::vector<ActiveService> active_svcs;
+    std::string max_init_svc;
+    int64_t max_init_dur_ms = 0;
+    std::string last_init_action;
+    std::vector<std::pair<std::string, int64_t>> init_milestones;
+    std::vector<TailEntry> tail;
+    uint64_t next_seq = 1;
+    pid_t logcat_pid = -1;
+    pid_t err_logcat_pid = -1;
+    volatile bool stop = false;
+};
+
+bool map_framework_stage(const char* tag, const char* ms, StageInfo* out);
+StageInfo infer_native_stage(const std::string& apex_state, const std::string& zyg_state);
+
+void push_tail(
+    EventState* st, int64_t ts_ms, const char* source, TailKind kind,
+    const std::string& raw_text, const std::string& group = "");
+
+bool is_stack_trace_noise(const char* msg);
+void* kmsg_reader_thread(void* arg);
+void* err_reader_thread(void* arg);
+void* event_reader_thread(void* arg);
+
+std::string build_bootloader_line();
+std::string short_init_action(const std::string& act);
+void init_phases(EventState* st, const std::string& bl_detail);
+std::string format_phase_row(const PhaseNode& n, int64_t now_ms, const RuleSet& rules);
+std::string format_tail_row(const TailEntry& e);
+
+}  // namespace bootscope

@@ -139,6 +139,21 @@ class BootScopeParsingTests(unittest.TestCase):
         self.assertEqual(bl['DRAM_TRAIN'], 133)
 
         with tempfile.TemporaryDirectory() as tmp:
+            kpi = Path(tmp) / 'bootloader-kpi.tsv'
+            kpi.write_text(
+                'bl_start\t32768\n'
+                'bl_load_kernel\t65536\n'
+                'bl_end\t98304\n'
+                'mpm_freq\t32768\n',
+                encoding='utf-8',
+            )
+            qcom = analyze_probe.read_qcom_kpi(kpi)
+        self.assertEqual(qcom['QCOM_BL_TOTAL_MS'], 2000)
+        self.assertEqual(qcom['QCOM_BL_PRE_MS'], 1000)
+        self.assertEqual(qcom['QCOM_BL_KL_MS'], 1000)
+        self.assertEqual(qcom['QCOM_MPM_FREQ_HZ'], 32768)
+
+        with tempfile.TemporaryDirectory() as tmp:
             tsv = Path(tmp) / 'psi.tsv'
             tsv.write_text(
                 '0\t12.00\t1000000\t0\t12.50\t200000\t50000\t3.00\t10000\t0\t0.00\n'
@@ -331,7 +346,7 @@ class PackagingAndModuleTests(unittest.TestCase):
             )
 
     def test_bootfont_glyph_table_consistency(self):
-        for rel in ('display/BootFont.java', 'display/bootscope_early.cpp'):
+        for rel in ('display/BootFont.java', 'display/early/canvas.cpp'):
             src = (ROOT / rel).read_text(encoding='utf-8')
             chars_match = re.search(r'(?:CHARACTERS|kFontChars)\s*=\s*"([^"]+)"', src)
             self.assertIsNotNone(chars_match, rel)
@@ -341,6 +356,44 @@ class PackagingAndModuleTests(unittest.TestCase):
             glyphs = re.findall(r'"([0-9A-F]{14})"', glyphs_block.group(1))
             self.assertEqual(len(characters), len(glyphs), rel)
             self.assertIn('?', characters, rel)
+
+    def test_display_scrolling_event_tail_parity(self):
+        early_files = [ROOT / 'display' / 'bootscope_early.cpp']
+        early_files += sorted((ROOT / 'display' / 'early').glob('*.h'))
+        early_files += sorted((ROOT / 'display' / 'early').glob('*.cpp'))
+        early_cpp = '\n'.join(p.read_text(encoding='utf-8') for p in early_files)
+        java_probe = (ROOT / 'display' / 'DisplayProbe.java').read_text(encoding='utf-8')
+        rules_conf = (ROOT / 'module' / 'rules.conf').read_text(encoding='utf-8')
+        for src in (early_cpp, java_probe):
+            self.assertIn('760', src)
+            self.assertIn('CRITICAL PATH', src)
+            self.assertIn('EVENTS', src)
+            self.assertIn('M=MOD', src)
+            self.assertIn('*:E', src)
+            self.assertIn('android_id', src)
+            self.assertIn('bootscope_rules.conf', src)
+        self.assertIn('920', early_cpp)
+        self.assertIn('1280', early_cpp)
+        self.assertIn('680', early_cpp)
+        self.assertIn('read_disk_io', early_cpp)
+        self.assertIn('read_top_cpu', early_cpp)
+        self.assertIn('read_mem_zram', early_cpp)
+        self.assertIn('read_cpu_freq_line', early_cpp)
+        self.assertIn('632', java_probe)
+        self.assertIn('ModuleError', early_cpp)
+        self.assertIn('MODULE_ERROR', java_probe)
+        self.assertIn('RKNS_3gui13LayerMetadataEPj', early_cpp)
+        self.assertIn('ENS_3gui13LayerMetadataEPj', early_cpp)
+        self.assertIn('getPhysicalDisplayTokenENS_17PhysicalDisplayIdE', early_cpp)
+        self.assertIn('getPhysicalDisplayTokenEm', early_cpp)
+        self.assertIn('Bootloader start count', early_cpp)
+        self.assertIn('Bootloader start count', java_probe)
+        self.assertIn('/dev/kmsg', early_cpp)
+        self.assertIn('is_stack_trace_noise', early_cpp)
+        self.assertIn('isStackTraceNoise', java_probe)
+        self.assertIn('ignore_cmd=', rules_conf)
+        self.assertIn('module_key=bootscope', rules_conf)
+        self.assertIn('redact_key=android_id', rules_conf)
 
     def test_build_module_ndk_resolution(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -360,14 +413,19 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('probe.sh', service_sh)
         self.assertIn('display.sh', service_sh)
         self.assertIn('disable_display', service_sh)
+        self.assertIn('bootscope_rules.conf', service_sh)
         self.assertIn('&', service_sh)
         self.assertNotIn('app_process', service_sh)
 
         customize_sh = (ROOT / 'module' / 'customize.sh').read_text(encoding='utf-8')
         self.assertIn('bootscope_early', customize_sh)
+        self.assertIn('bootscope_rules.conf', customize_sh)
         self.assertIn('KSU', customize_sh)
         self.assertIn('arm64-v8a', customize_sh)
         self.assertNotRegex(customize_sh, r'(?m)^\s*exit\b')
+
+        uninstall_sh = (ROOT / 'module' / 'uninstall.sh').read_text(encoding='utf-8')
+        self.assertIn('bootscope_rules.conf', uninstall_sh)
 
         rc = (ROOT / 'module' / 'initrc' / 'bootscope.rc').read_text(encoding='utf-8')
         self.assertIn('service bootscope_early /metadata/vold/ksu/bootscope_early', rc)
@@ -381,6 +439,7 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('init-events.tsv', probe_sh)
         self.assertIn('psi.tsv', probe_sh)
         self.assertIn('proc.tsv', probe_sh)
+        self.assertIn('bootloader-kpi.tsv', probe_sh)
         self.assertIn('ro\\.boot\\.boottime', probe_sh)
         self.assertIn('dmesg', probe_sh)
         self.assertIn('.display.lock', display_sh)
@@ -388,14 +447,18 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('first_frame_submitted_ms=', display_sh)
         self.assertIn('unsupported_sdk', display_sh)
 
+        sf_gui_cpp = (ROOT / 'display' / 'early' / 'sf_gui.cpp').read_text(encoding='utf-8')
+        self.assertIn('ro.surface_flinger.primary_display_orientation', sf_gui_cpp)
+        self.assertIn('rot_quad', sf_gui_cpp)
+
     def test_build_module_headless_zip(self):
         subprocess.run([sys.executable, str(ROOT / 'build_module.py'), '--no-display'], check=True)
         version = package_utils.read_module_version(ROOT / 'module' / 'module.prop')
         archive_path = ROOT / 'dist' / f'bootscope-{version}-headless.zip'
         self.assertTrue(archive_path.is_file())
         with ZipFile(archive_path, 'r') as archive:
-            self.assertEqual(sorted(archive.namelist()), ['module.prop', 'probe.sh', 'service.sh'])
-            for name in ('probe.sh', 'service.sh'):
+            self.assertEqual(sorted(archive.namelist()), ['action.sh', 'module.prop', 'probe.sh', 'service.sh'])
+            for name in ('action.sh', 'probe.sh', 'service.sh'):
                 self.assertEqual(archive.getinfo(name).external_attr >> 16, 0o100755)
                 self.assertNotIn(b'\r\n', archive.read(name))
 

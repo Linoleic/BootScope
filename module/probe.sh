@@ -139,7 +139,7 @@ done
 (
     timeout -k 1 3 dmesg 2>"$RUN/dmesg-error.txt"
     echo "$?" > "$RUN/dmesg-exit.txt"
-) | awk '
+) | awk -v kpi_out="$RUN/bootloader-kpi.tsv" '
     BEGIN { sq = sprintf("%c", 39) }
     function emit(ts, kind, name, detail) {
         if (count < 1024) {
@@ -147,9 +147,24 @@ done
             count++
         }
     }
+    function emit_kpi(k, seg) {
+        sub(/^.*= /, "", seg)
+        printf "%s\t%s\n", k, seg > kpi_out
+    }
     {
         line = $0
         sub(/\r$/, "", line)
+        if (match(line, /KPI: Bootloader start count = [0-9]+/)) {
+            emit_kpi("bl_start", substr(line, RSTART, RLENGTH))
+        } else if (match(line, /KPI: Bootloader end count = [0-9]+/)) {
+            emit_kpi("bl_end", substr(line, RSTART, RLENGTH))
+        } else if (match(line, /KPI: Bootloader load kernel count = [0-9]+/)) {
+            emit_kpi("bl_load_kernel", substr(line, RSTART, RLENGTH))
+        } else if (match(line, /KPI: Kernel MPM timestamp = [0-9]+/)) {
+            emit_kpi("kernel_mpm", substr(line, RSTART, RLENGTH))
+        } else if (match(line, /KPI: Kernel MPM Clock frequency = [0-9]+/)) {
+            emit_kpi("mpm_freq", substr(line, RSTART, RLENGTH))
+        }
         if (!match(line, /^[[:space:]]*\[[[:space:]]*[0-9]+\.[0-9]+\][[:space:]]+init:[[:space:]]+/)) next
         prefix = substr(line, RSTART, RLENGTH)
         msg = substr(line, RSTART + RLENGTH)

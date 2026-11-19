@@ -1,543 +1,25 @@
-#include <android/native_window.h>
-#include <ctype.h>
-#include <dlfcn.h>
+#include "early/boot_sources.h"
+#include "early/canvas.h"
+#include "early/common.h"
+#include "early/rules.h"
+#include "early/sf_gui.h"
+#include "early/sys_metrics.h"
+
 #include <fcntl.h>
 #include <math.h>
+#include <pthread.h>
 #include <signal.h>
-#include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/system_properties.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
 
-#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
+namespace bootscope {
 namespace {
-
-constexpr int kWidth = 680;
-constexpr int kHeight = 316;
-constexpr int32_t kLayer = 0x40000001;
-constexpr int kStageTotal = 10;
-constexpr const char* kLayerName = "BootScopeDisplay";
-constexpr const char* kDisableMarker = "/metadata/vold/ksu/bootscope_disable_display";
-constexpr const char* kTmpExecPath = "/tmp/bootscope_early";
-constexpr const char* kPidPath = "/dev/bootscope_early.pid";
-constexpr const char* kLogPath = "/dev/bootscope_early.log";
-
-// Little-endian RGBA_8888 (0xAABBGGRR)
-constexpr uint32_t kColorBg = 0xff241b10;       // #101b24
-constexpr uint32_t kColorAccent = 0xffcae07b;   // #7be0ca
-constexpr uint32_t kColorPrimary = 0xfff7f4ed;  // #edf4f7
-constexpr uint32_t kColorMuted = 0xffd6c39e;    // #9ec3d6
-constexpr uint32_t kColorTrack = 0xff42321e;    // #1e3242
-
-constexpr const char* kFontChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./:-_=+@>%?";
-constexpr const char* kFontGlyphs[] = {
-    "0E11111F111111", "1E11111E11111E", "0E11101010110E", "1E11111111111E",
-    "1F10101E10101F", "1F10101E101010", "0E11101711110F", "1111111F111111",
-    "1F04040404041F", "0702020212120C", "11121418141211", "1010101010101F",
-    "111B1515111111", "11191513111111", "0E11111111110E", "1E11111E101010",
-    "0E11111115120D", "1E11111E141211", "0F10100E01011E", "1F040404040404",
-    "1111111111110E", "11111111110A04", "1111111515150A", "11110A040A1111",
-    "11110A04040404", "1F01020408101F",
-    "0E11131519110E", "040C040404040E", "0E11010204081F", "1E01010E01011E",
-    "02060A121F0202", "1F10101E01011E", "0E10101E11110E", "1F010204080808",
-    "0E11110E11110E", "0E11110F01010E",
-    "00000000000C0C", "01020204080810", "000C0C000C0C00", "0000001F000000",
-    "0000000000001F", "00001F001F0000", "0004041F040400", "0E11171517100E",
-    "10080402040810", "18190204081303", "0E110102040004"
-};
-
-struct Sp {
-    void* ptr;
-    Sp() : ptr(nullptr) {}
-    Sp(const Sp& o) : ptr(o.ptr) {}
-    ~Sp() {}
-};
-
-struct alignas(16) Blob {
-    uint8_t data[1024];
-};
-
-struct LibGuiApi {
-    void* libbinder = nullptr;
-    void* libutils = nullptr;
-    void* libgui = nullptr;
-
-    Sp (*ps_self)() = nullptr;
-    void (*ps_start)(void*) = nullptr;
-
-    void (*str8_ctor)(void*, const char*) = nullptr;
-    void (*str8_dtor)(void*) = nullptr;
-
-    void (*lm_ctor)(void*) = nullptr;
-    Sp (*scc_default)() = nullptr;
-    Sp (*scc_create)(void*, const void*, uint32_t, uint32_t, int32_t, uint32_t,
-                     const Sp&, const void*, uint32_t*) = nullptr;
-    std::vector<uint64_t> (*get_phys_ids)() = nullptr;
-    Sp (*get_phys_token)(uint64_t) = nullptr;
-    Sp (*get_internal_token)() = nullptr;
-    int32_t (*get_display_state)(const Sp&, void*) = nullptr;
-    int32_t (*get_active_mode)(const Sp&, void*) = nullptr;
-    Sp (*sc_get_surface)(void*) = nullptr;
-
-    void (*tx_ctor)(void*) = nullptr;
-    void* (*tx_set_layer)(void*, const Sp&, int32_t) = nullptr;
-    void* (*tx_set_pos)(void*, const Sp&, float, float) = nullptr;
-    void* (*tx_set_matrix)(void*, const Sp&, float, float, float, float) = nullptr;
-    void* (*tx_show)(void*, const Sp&) = nullptr;
-    void* (*tx_hide)(void*, const Sp&) = nullptr;
-    int32_t (*tx_apply)(void*, bool, bool) = nullptr;
-
-    bool load() {
-        libbinder = dlopen("/system/lib64/libbinder.so", RTLD_NOW);
-        libutils = dlopen("/system/lib64/libutils.so", RTLD_NOW);
-        libgui = dlopen("/system/lib64/libgui.so", RTLD_NOW);
-        if (!libbinder || !libutils || !libgui) return false;
-
-        ps_self = (Sp(*)())dlsym(libbinder, "_ZN7android12ProcessState4selfEv");
-        ps_start = (void(*)(void*))dlsym(libbinder, "_ZN7android12ProcessState15startThreadPoolEv");
-        str8_ctor = (void(*)(void*, const char*))dlsym(libutils, "_ZN7android7String8C1EPKc");
-        str8_dtor = (void(*)(void*))dlsym(libutils, "_ZN7android7String8D1Ev");
-        lm_ctor = (void(*)(void*))dlsym(libgui, "_ZN7android3gui13LayerMetadataC1Ev");
-        scc_default = (Sp(*)())dlsym(libgui, "_ZN7android21SurfaceComposerClient10getDefaultEv");
-        scc_create = (Sp(*)(void*, const void*, uint32_t, uint32_t, int32_t, uint32_t,
-                            const Sp&, const void*, uint32_t*))dlsym(
-            libgui,
-            "_ZN7android21SurfaceComposerClient13createSurfaceERKNS_7String8EjjiiRKNS_2spINS_7IBinderEEERKNS_3gui13LayerMetadataEPj");
-        get_phys_ids = (std::vector<uint64_t>(*)())dlsym(
-            libgui, "_ZN7android21SurfaceComposerClient21getPhysicalDisplayIdsEv");
-        get_phys_token = (Sp(*)(uint64_t))dlsym(
-            libgui, "_ZN7android21SurfaceComposerClient23getPhysicalDisplayTokenENS_17PhysicalDisplayIdE");
-        get_internal_token = (Sp(*)())dlsym(
-            libgui, "_ZN7android21SurfaceComposerClient23getInternalDisplayTokenEv");
-        get_display_state = (int32_t(*)(const Sp&, void*))dlsym(
-            libgui, "_ZN7android21SurfaceComposerClient15getDisplayStateERKNS_2spINS_7IBinderEEEPNS_2ui12DisplayStateE");
-        get_active_mode = (int32_t(*)(const Sp&, void*))dlsym(
-            libgui, "_ZN7android21SurfaceComposerClient20getActiveDisplayModeERKNS_2spINS_7IBinderEEEPNS_2ui11DisplayModeE");
-        sc_get_surface = (Sp(*)(void*))dlsym(libgui, "_ZN7android14SurfaceControl10getSurfaceEv");
-        tx_ctor = (void(*)(void*))dlsym(libgui, "_ZN7android21SurfaceComposerClient11TransactionC1Ev");
-        tx_set_layer = (void*(*)(void*, const Sp&, int32_t))dlsym(
-            libgui, "_ZN7android21SurfaceComposerClient11Transaction8setLayerERKNS_2spINS_14SurfaceControlEEEi");
-        tx_set_pos = (void*(*)(void*, const Sp&, float, float))dlsym(
-            libgui, "_ZN7android21SurfaceComposerClient11Transaction11setPositionERKNS_2spINS_14SurfaceControlEEEff");
-        tx_set_matrix = (void*(*)(void*, const Sp&, float, float, float, float))dlsym(
-            libgui, "_ZN7android21SurfaceComposerClient11Transaction9setMatrixERKNS_2spINS_14SurfaceControlEEEffff");
-        tx_show = (void*(*)(void*, const Sp&))dlsym(
-            libgui, "_ZN7android21SurfaceComposerClient11Transaction4showERKNS_2spINS_14SurfaceControlEEE");
-        tx_hide = (void*(*)(void*, const Sp&))dlsym(
-            libgui, "_ZN7android21SurfaceComposerClient11Transaction4hideERKNS_2spINS_14SurfaceControlEEE");
-        tx_apply = (int32_t(*)(void*, bool, bool))dlsym(
-            libgui, "_ZN7android21SurfaceComposerClient11Transaction5applyEbb");
-
-        bool has_display_lookup = (get_phys_ids && get_phys_token) || get_internal_token;
-        return str8_ctor && str8_dtor && lm_ctor && scc_default && scc_create
-            && has_display_lookup && get_display_state && sc_get_surface
-            && tx_ctor && tx_set_layer && tx_set_pos && tx_set_matrix && tx_show && tx_apply;
-    }
-};
-
-struct Geometry {
-    int width = 1080;
-    int height = 2340;
-    int refresh_hz = 0;
-    float pos_x = 38.0f;
-    float pos_y = 140.0f;
-    float scale = 1.0f;
-
-    void compute() {
-        int min_dim = width < height ? width : height;
-        float margin_x = roundf((float)width * 0.035f);
-        if (margin_x < 24.0f) margin_x = 24.0f;
-        float target_w = roundf((float)min_dim * 0.62f);
-        float max_w = (float)width - margin_x * 2.0f;
-        if (target_w > max_w) target_w = max_w;
-        scale = target_w / (float)kWidth;
-        if (scale < 0.5f) scale = 0.5f;
-        pos_x = margin_x;
-        pos_y = roundf((float)height * 0.06f);
-    }
-
-    bool same_transform(const Geometry& o) const {
-        return fabsf(pos_x - o.pos_x) < 0.5f
-            && fabsf(pos_y - o.pos_y) < 0.5f
-            && fabsf(scale - o.scale) < 0.005f;
-    }
-};
-
-struct StageInfo {
-    int step = 0;
-    std::string label = "EARLY_BOOT";
-    std::string raw_ms;
-};
-
-int64_t boottime_ms() {
-    struct timespec ts {};
-    clock_gettime(CLOCK_BOOTTIME, &ts);
-    return (int64_t)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
-}
-
-std::string get_prop(const char* name) {
-    const prop_info* pi = __system_property_find(name);
-    if (!pi) return "";
-    std::string result;
-    __system_property_read_callback(
-        pi,
-        [](void* cookie, const char*, const char* value, uint32_t) {
-            if (value) *(std::string*)cookie = value;
-        },
-        &result);
-    return result;
-}
-
-std::string svc_state(const char* svc) {
-    std::string key = std::string("init.svc.") + svc;
-    std::string v = get_prop(key.c_str());
-    if (v == "running") return "RUN";
-    if (v == "stopped") return "STOP";
-    if (v == "restarting") return "RST";
-    if (v == "stopping") return "STPG";
-    return "-";
-}
-
-bool animation_active() {
-    return get_prop("init.svc.bootanim") == "running"
-        && get_prop("service.bootanim.exit") != "1"
-        && get_prop("sys.boot_completed") != "1";
-}
-
-bool parse_mode_prop(const char* key, int* w, int* h, int* hz) {
-    std::string v = get_prop(key);
-    if (v.empty()) return false;
-    int pw = 0, ph = 0, phz = 0;
-    if (sscanf(v.c_str(), "%dx%d@%d", &pw, &ph, &phz) >= 2 && pw > 0 && ph > 0) {
-        *w = pw;
-        *h = ph;
-        *hz = phz;
-        return true;
-    }
-    return false;
-}
-
-bool sane_dim(int v) {
-    return v >= 240 && v <= 8192;
-}
-
-Geometry query_geometry(const LibGuiApi& gui, const Sp& display_token) {
-    Geometry g;
-    bool got_size = false;
-    uint32_t orientation = 0;
-    if (display_token.ptr) {
-        uint32_t state[32]{};
-        if (gui.get_display_state(display_token, state) == 0
-                && sane_dim((int)state[2]) && sane_dim((int)state[3])) {
-            orientation = state[1];
-            g.width = (int)state[2];
-            g.height = (int)state[3];
-            got_size = true;
-        }
-        if (gui.get_active_mode) {
-            uint8_t mode[256]{};
-            if (gui.get_active_mode(display_token, mode) == 0) {
-                int mw = (int)((uint32_t*)mode)[1];
-                int mh = (int)((uint32_t*)mode)[2];
-                float fps = ((float*)mode)[12];
-                if (sane_dim(mw) && sane_dim(mh)) {
-                    if (orientation == 1 || orientation == 3) {
-                        int tmp = mw;
-                        mw = mh;
-                        mh = tmp;
-                    }
-                    g.width = mw;
-                    g.height = mh;
-                    got_size = true;
-                }
-                if (fps >= 15.0f && fps <= 480.0f) {
-                    g.refresh_hz = (int)lroundf(fps);
-                }
-            }
-        }
-    }
-    if (!got_size) {
-        if (!parse_mode_prop("vendor.display.preferred_mode", &g.width, &g.height, &g.refresh_hz)) {
-            parse_mode_prop("persist.vendor.display.primary.boot_config", &g.width, &g.height, &g.refresh_hz);
-        }
-    }
-    g.compute();
-    return g;
-}
-
-void fill_rect(uint32_t* px, int stride, int left, int top, int right, int bottom, uint32_t color) {
-    if (left < 0) left = 0;
-    if (top < 0) top = 0;
-    if (right > kWidth) right = kWidth;
-    if (bottom > kHeight) bottom = kHeight;
-    for (int y = top; y < bottom; y++) {
-        uint32_t* row = px + y * stride;
-        for (int x = left; x < right; x++) {
-            row[x] = color;
-        }
-    }
-}
-
-int hex_val(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    return 0;
-}
-
-void draw_text(uint32_t* px, int stride, const char* text, int x, int y, int scale, uint32_t color) {
-    if (!text) return;
-    const size_t n_chars = strlen(kFontChars);
-    const size_t fallback = n_chars - 1;
-    for (size_t i = 0; text[i] != '\0'; i++, x += scale * 6) {
-        char ch = (char)toupper((unsigned char)text[i]);
-        if (ch == ' ') continue;
-        const char* found = strchr(kFontChars, ch);
-        size_t idx = found ? (size_t)(found - kFontChars) : fallback;
-        const char* glyph = kFontGlyphs[idx];
-        for (int row = 0; row < 7; row++) {
-            int bits = hex_val(glyph[row * 2]) * 16 + hex_val(glyph[row * 2 + 1]);
-            for (int col = 0; col < 5; col++) {
-                if ((bits & (16 >> col)) == 0) continue;
-                int left = x + col * scale;
-                int top = y + row * scale;
-                fill_rect(px, stride, left, top, left + scale, top + scale, color);
-            }
-        }
-    }
-}
-
-bool map_framework_stage(const char* tag, const char* ms, StageInfo* out) {
-    struct Entry {
-        const char* tag;
-        int step;
-        const char* label;
-    };
-    static const Entry kMap[] = {
-        {"boot_progress_start", 4, "BOOT_START"},
-        {"boot_progress_preload_start", 5, "PRELOAD"},
-        {"boot_progress_preload_end", 6, "PRELOADED"},
-        {"boot_progress_system_run", 7, "SYSTEM_RUN"},
-        {"boot_progress_pms_start", 8, "PMS_START"},
-        {"boot_progress_pms_system_scan_start", 8, "PMS_SYS_SCAN"},
-        {"boot_progress_pms_data_scan_start", 8, "PMS_DATA_SCAN"},
-        {"boot_progress_pms_scan_end", 8, "PMS_SCANNED"},
-        {"boot_progress_pms_ready", 8, "PMS_READY"},
-        {"boot_progress_ams_ready", 9, "AMS_READY"},
-        {"boot_progress_enable_screen", 10, "ENABLE_SCREEN"},
-        {"sf_stop_bootanim", 10, "STOP_BOOTANIM"},
-        {"wm_boot_animation_done", 10, "ANIM_DONE"},
-    };
-    for (const auto& e : kMap) {
-        if (strcmp(tag, e.tag) == 0) {
-            out->step = e.step;
-            out->label = e.label;
-            out->raw_ms = ms;
-            return true;
-        }
-    }
-    return false;
-}
-
-StageInfo infer_native_stage(const std::string& apex_state, const std::string& zyg_state) {
-    std::string apexd_status = get_prop("apexd.status");
-    if (zyg_state == "RUN") {
-        return {3, "ZYGOTE_START", ""};
-    }
-    if (apexd_status == "ready" || apexd_status == "activated" || apex_state == "RUN" || apex_state == "STOP") {
-        return {2, "APEX_POST_FS", ""};
-    }
-    return {1, "EARLY_BOOTANIM", ""};
-}
-
-struct EventState {
-    std::mutex mu;
-    StageInfo framework_stage;
-    pid_t logcat_pid = -1;
-    volatile bool stop = false;
-};
-
-void* event_reader_thread(void* arg) {
-    EventState* st = (EventState*)arg;
-    for (int attempt = 0; attempt < 8 && !st->stop; attempt++) {
-        int pipefd[2]{-1, -1};
-        if (pipe(pipefd) != 0) break;
-
-        pid_t pid = fork();
-        if (pid == 0) {
-            dup2(pipefd[1], STDOUT_FILENO);
-            dup2(pipefd[1], STDERR_FILENO);
-            close(pipefd[0]);
-            close(pipefd[1]);
-            const char* argv[] = {
-                "/system/bin/logcat", "-b", "events", "-v", "tag", "-s",
-                "boot_progress_start:I",
-                "boot_progress_preload_start:I",
-                "boot_progress_preload_end:I",
-                "boot_progress_system_run:I",
-                "boot_progress_pms_start:I",
-                "boot_progress_pms_system_scan_start:I",
-                "boot_progress_pms_data_scan_start:I",
-                "boot_progress_pms_scan_end:I",
-                "boot_progress_pms_ready:I",
-                "boot_progress_ams_ready:I",
-                "boot_progress_enable_screen:I",
-                "sf_stop_bootanim:I",
-                "wm_boot_animation_done:I",
-                nullptr
-            };
-            execv(argv[0], (char* const*)argv);
-            _exit(127);
-        }
-        close(pipefd[1]);
-        if (pid < 0) {
-            close(pipefd[0]);
-            usleep(300000);
-            continue;
-        }
-        {
-            std::lock_guard<std::mutex> lock(st->mu);
-            st->logcat_pid = pid;
-        }
-
-        FILE* fp = fdopen(pipefd[0], "r");
-        if (fp) {
-            char line[256];
-            while (!st->stop && fgets(line, sizeof(line), fp)) {
-                char tag[96]{};
-                char ms[32]{};
-                if (sscanf(line, "%*c/%95[^:]: %31[0-9]", tag, ms) == 2) {
-                    StageInfo next;
-                    if (map_framework_stage(tag, ms, &next)) {
-                        std::lock_guard<std::mutex> lock(st->mu);
-                        st->framework_stage = next;
-                    }
-                }
-            }
-            fclose(fp);
-        } else {
-            close(pipefd[0]);
-        }
-        int status = 0;
-        waitpid(pid, &status, 0);
-        {
-            std::lock_guard<std::mutex> lock(st->mu);
-            st->logcat_pid = -1;
-        }
-        if (!st->stop) usleep(400000);
-    }
-    return nullptr;
-}
-
-ANativeWindow* extract_anw(void* surf_ptr) {
-    uint8_t* base = (uint8_t*)surf_ptr;
-    for (size_t off = 0; off <= 64; off += 8) {
-        if (*(uint32_t*)(base + off) == 0x5f776e64) {
-            return (ANativeWindow*)(base + off);
-        }
-    }
-    return nullptr;
-}
-
-struct PsiSample {
-    bool valid = false;
-    uint64_t total_us = 0;
-    float avg10 = 0.0f;
-};
-
-bool read_psi_file(const char* path, PsiSample* out) {
-    FILE* f = fopen(path, "r");
-    if (!f) return false;
-    char line[256];
-    bool ok = false;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "some ", 5) == 0) {
-            float avg10 = 0.0f;
-            unsigned long long total = 0;
-            const char* a = strstr(line, "avg10=");
-            const char* t = strstr(line, "total=");
-            if (a && t && sscanf(a, "avg10=%f", &avg10) == 1 && sscanf(t, "total=%llu", &total) == 1) {
-                out->valid = true;
-                out->avg10 = avg10;
-                out->total_us = (uint64_t)total;
-                ok = true;
-            }
-            break;
-        }
-    }
-    fclose(f);
-    return ok;
-}
-
-int compute_psi_pct(const PsiSample& cur, const PsiSample& prev, int64_t dt_ms) {
-    if (!cur.valid) return -1;
-    if (prev.valid && dt_ms > 0 && cur.total_us >= prev.total_us) {
-        double pct = ((double)(cur.total_us - prev.total_us) / ((double)dt_ms * 1000.0)) * 100.0;
-        int rounded = (int)lround(pct);
-        if (rounded < 0) rounded = 0;
-        if (rounded > 100) rounded = 100;
-        return rounded;
-    }
-    int rounded = (int)lroundf(cur.avg10);
-    if (rounded < 0) rounded = 0;
-    if (rounded > 100) rounded = 100;
-    return rounded;
-}
-
-void append_kv_tokens(const std::string& raw, std::vector<std::pair<std::string, std::string>>& kvs) {
-    size_t start = 0;
-    while (start < raw.size()) {
-        size_t comma = raw.find(',', start);
-        std::string item = (comma == std::string::npos) ? raw.substr(start) : raw.substr(start, comma - start);
-        size_t colon = item.find(':');
-        if (colon != std::string::npos && colon > 0 && colon + 1 < item.size()) {
-            kvs.emplace_back(item.substr(0, colon), item.substr(colon + 1));
-        }
-        if (comma == std::string::npos) break;
-        start = comma + 1;
-    }
-}
-
-std::string build_bootloader_line() {
-    std::vector<std::pair<std::string, std::string>> kvs;
-    append_kv_tokens(get_prop("ro.boot.boottime"), kvs);
-    append_kv_tokens(get_prop("ro.boot.boottime_extra"), kvs);
-    if (kvs.empty()) return "BL N/A";
-
-    const char* preferred[] = {"2BLE", "3BLE", "AVB", "KL", "DISP", "DRAM_TRAIN", "SW"};
-    std::string line = "BL";
-    for (const char* key : preferred) {
-        for (const auto& kv : kvs) {
-            if (kv.first == key && kv.second != "0") {
-                std::string tok = " " + kv.first + ":" + kv.second;
-                if (line.size() + tok.size() <= 35) {
-                    line += tok;
-                }
-                break;
-            }
-        }
-    }
-    if (line == "BL") {
-        for (const auto& kv : kvs) {
-            std::string tok = " " + kv.first + ":" + kv.second;
-            if (line.size() + tok.size() <= 35) {
-                line += tok;
-            } else {
-                break;
-            }
-        }
-    }
-    return line;
-}
 
 void write_pid_file() {
     FILE* f = fopen(kPidPath, "w");
@@ -592,9 +74,301 @@ bool reexec_from_tmp_if_needed(int argc, char** argv) {
     return false;
 }
 
+struct RenderContext {
+    bool preview = false;
+    int frame_idx = 0;
+    int64_t now_ms = 0;
+    double uptime_s = 0.0;
+    const Geometry* geom = nullptr;
+    const DeviceInfo* dev_info = nullptr;
+    const StageInfo* stage = nullptr;
+    const PhaseNode* phases = nullptr;
+    int expanded_idx = -1;
+    std::string exp_line1;
+    std::string exp_line2;
+    uint32_t exp_col2 = kColorMuted;
+    std::string max_init_svc;
+    int64_t max_init_dur_ms = 0;
+    std::string psi_compact;
+    int cpu_pct = -1;
+    int io_pct = -1;
+    const SysMetrics* sys = nullptr;
+    const std::string* cur_states = nullptr;
+    const int64_t* svc_start_ms = nullptr;
+    const char* const* short_names = nullptr;
+    int svc_count = 0;
+    const std::vector<std::pair<std::string, int64_t>>* init_ms = nullptr;
+    std::string bootloader_line;
+    std::string footer;
+    std::string rules_label;
+    const RuleSet* rules = nullptr;
+    const std::vector<TailEntry>* tail = nullptr;
+    size_t max_rows = 8;
+};
+
+void draw_resources_block(
+        uint32_t* px, int stride, int rx0, int rx1, int ry, size_t rchars, const RenderContext& ctx) {
+    fill_rect(px, stride, rx0, ry, rx1, ry + 2, kColorTrack);
+    draw_text(px, stride, "RESOURCES", rx0, ry + 8, 2, kColorAccent);
+    std::string psi_str = ctx.psi_compact.empty() ? "PSI N/A" : ctx.psi_compact;
+    uint32_t psi_col = (ctx.io_pct >= 30 || ctx.cpu_pct >= 65) ? kColorError : kColorPrimary;
+    std::string line_a = psi_str + "  " + ctx.sys->freq_line;
+    if (line_a.size() > rchars) line_a.resize(rchars);
+    draw_text(px, stride, line_a.c_str(), rx0, ry + 29, 2, psi_col);
+
+    std::string line_b = ctx.sys->mem_line;
+    if (line_b.size() > rchars) line_b.resize(rchars);
+    draw_text(px, stride, line_b.c_str(), rx0, ry + 50, 2,
+              ctx.sys->mem_low ? kColorError : kColorPrimary);
+
+    std::string line_c = ctx.sys->io_line;
+    if (line_c.size() > rchars) line_c.resize(rchars);
+    draw_text(px, stride, line_c.c_str(), rx0, ry + 71, 2,
+              ctx.sys->io_busy ? kColorError : kColorMuted);
+}
+
+void draw_tail_block(
+        uint32_t* px, int stride, int tx0, int tx1, int ty, size_t max_chars, const RenderContext& ctx) {
+    fill_rect(px, stride, tx0, ty, tx1, ty + 2, kColorTrack);
+    draw_text(px, stride, "EVENTS", tx0, ty + 9, 2, kColorAccent);
+    const char* legend = "K=INIT P=PROG S=SVC E=ERR M=MOD";
+    int legend_x = tx1 - (int)strlen(legend) * 12;
+    if (legend_x > tx0 + 96) {
+        draw_text(px, stride, legend, legend_x, ty + 9, 2, kColorMuted);
+    }
+    if (ctx.tail->empty()) {
+        draw_text(px, stride, "WAITING BOOT EVENTS...", tx0, ty + 31, 2, kColorMuted);
+        return;
+    }
+    for (size_t i = 0; i < ctx.tail->size() && i < ctx.max_rows; i++) {
+        const TailEntry& item = (*ctx.tail)[i];
+        int row_y = ty + 31 + (int)i * 22;
+        uint32_t row_color = kColorMuted;
+        if (item.kind == TailKind::Stage) {
+            row_color = kColorAccent;
+        } else if (item.kind == TailKind::Error) {
+            row_color = kColorError;
+        } else if (item.kind == TailKind::ModuleError) {
+            row_color = kColorAccent;
+            fill_rect(px, stride, tx0 - 10, row_y, tx0 - 6, row_y + 14, kColorAccent);
+        }
+        std::string row_str = format_tail_row(item);
+        if (row_str.size() > max_chars) row_str.resize(max_chars);
+        draw_text(px, stride, row_str.c_str(), tx0, row_y, 2, row_color);
+    }
+}
+
+void draw_dashboard(uint32_t* px, int stride, const RenderContext& ctx) {
+    const int bw = canvas_width();
+    const int bh = canvas_height();
+    const bool is_land = (bw == kLandWidth);
+    fill_rect(px, stride, 0, 0, bw, bh, kColorBg);
+    fill_rect(px, stride, 0, 0, 8, bh, kColorAccent);
+
+    draw_text(px, stride, ctx.preview ? "BOOTSCOPE / PREVIEW" : "BOOTSCOPE / BOOT", 24, 20, 3, kColorAccent);
+
+    char mode_buf[32];
+    if (ctx.geom->refresh_hz > 0) {
+        snprintf(mode_buf, sizeof(mode_buf), "%dX%d@%d", ctx.geom->width, ctx.geom->height, ctx.geom->refresh_hz);
+    } else {
+        snprintf(mode_buf, sizeof(mode_buf), "%dX%d", ctx.geom->width, ctx.geom->height);
+    }
+    int mode_x = bw - 24 - (int)strlen(mode_buf) * 18;
+    if (mode_x < 420) mode_x = 420;
+    draw_text(px, stride, mode_buf, mode_x, 20, 3, kColorMuted);
+
+    const int left_r = is_land ? 584 : (bw - 24);
+    const size_t left_chars = is_land ? 46 : 59;
+    std::string d1 = ctx.dev_info->line1;
+    std::string d2 = ctx.dev_info->line2;
+    if (d1.size() > left_chars) d1.resize(left_chars);
+    if (d2.size() > left_chars) d2.resize(left_chars);
+    draw_text(px, stride, d1.c_str(), 24, 50, 2, kColorPrimary);
+    draw_text(px, stride, d2.c_str(), 24, 70, 2, kColorMuted);
+
+    char meta_buf[48];
+    snprintf(meta_buf, sizeof(meta_buf), "UPTIME %-7.2fS  STAGE %d/%d", ctx.uptime_s, ctx.stage->step, kStageTotal);
+    draw_text(px, stride, meta_buf, 24, 92, 3, kColorPrimary);
+
+    const int bar_top = 122, bar_bottom = 136;
+    const int seg_gap = 6;
+    const int seg_w = ((left_r - 24) - 5 * seg_gap) / 6;
+    for (int i = 0; i < 6; i++) {
+        int x0 = 24 + i * (seg_w + seg_gap);
+        int x1 = x0 + seg_w;
+        fill_rect(px, stride, x0, bar_top, x1, bar_bottom, kColorTrack);
+        if (ctx.phases[i].state == NodeState::Done) {
+            fill_rect(px, stride, x0, bar_top, x1, bar_bottom, kColorAccent);
+        } else if (ctx.phases[i].state == NodeState::Running) {
+            int pulse_w = (seg_w / 3) + ((ctx.frame_idx % 4) * (seg_w / 6));
+            if (pulse_w > seg_w) pulse_w = seg_w;
+            int64_t rdur = ctx.phases[i].start_ms >= 0 ? (ctx.now_ms - ctx.phases[i].start_ms) : 0;
+            uint32_t run_col = (rdur >= 6000) ? kColorError : kColorPrimary;
+            fill_rect(px, stride, x0, bar_top, x0 + pulse_w, bar_bottom, run_col);
+            fill_rect(px, stride, x0, bar_top, x1, bar_top + 2, kColorAccent);
+            fill_rect(px, stride, x0, bar_bottom - 2, x1, bar_bottom, kColorAccent);
+        }
+        int lbl_len = (int)strlen(ctx.phases[i].id);
+        int lbl_x = x0 + (seg_w - lbl_len * 12) / 2;
+        uint32_t lbl_col = kColorMuted;
+        if (ctx.phases[i].state == NodeState::Done) lbl_col = kColorAccent;
+        else if (ctx.phases[i].state == NodeState::Running) lbl_col = kColorPrimary;
+        draw_text(px, stride, ctx.phases[i].id, lbl_x, 142, 2, lbl_col);
+    }
+
+    fill_rect(px, stride, 24, 164, left_r, 166, kColorTrack);
+    draw_text(px, stride, "CRITICAL PATH", 24, 172, 2, kColorAccent);
+    std::string stage_hdr = ctx.stage->raw_ms.empty() ? ctx.stage->label : (ctx.stage->label + " " + ctx.stage->raw_ms + "MS");
+    if (stage_hdr.size() > 26) stage_hdr.resize(26);
+    int sh_x = left_r - (int)stage_hdr.size() * 12;
+    draw_text(px, stride, stage_hdr.c_str(), sh_x, 172, 2, kColorPrimary);
+
+    int tree_y = 194;
+    for (int i = 0; i < 6; i++) {
+        uint32_t row_col = kColorMuted;
+        if (ctx.phases[i].state == NodeState::Done) {
+            row_col = kColorAccent;
+        } else if (ctx.phases[i].state == NodeState::Running) {
+            int64_t rdur = ctx.phases[i].start_ms >= 0 ? (ctx.now_ms - ctx.phases[i].start_ms) : 0;
+            row_col = (rdur >= 6000) ? kColorError : kColorPrimary;
+        }
+        std::string prow = format_phase_row(ctx.phases[i], ctx.now_ms, *ctx.rules);
+        if (prow.size() > left_chars) prow.resize(left_chars);
+        draw_text(px, stride, prow.c_str(), 24, tree_y, 2, row_col);
+        tree_y += 20;
+
+        if (i == ctx.expanded_idx) {
+            int sub1_y = tree_y;
+            int sub2_y = tree_y + 20;
+            fill_rect(px, stride, 30, sub1_y - 4, 32, sub2_y + 8, kColorAccent);
+            fill_rect(px, stride, 32, sub1_y + 6, 40, sub1_y + 8, kColorAccent);
+            fill_rect(px, stride, 32, sub2_y + 6, 40, sub2_y + 8, kColorAccent);
+            std::string el1 = ctx.exp_line1;
+            std::string el2 = ctx.exp_line2;
+            if (el1.size() > left_chars - 2) el1.resize(left_chars - 2);
+            if (el2.size() > left_chars - 2) el2.resize(left_chars - 2);
+            draw_text(px, stride, el1.c_str(), 46, sub1_y, 2, kColorPrimary);
+            draw_text(px, stride, el2.c_str(), 46, sub2_y, 2, ctx.exp_col2);
+            tree_y += 40;
+        }
+    }
+    if (ctx.expanded_idx < 0) {
+        std::string sum1 = "ALL PHASES COLLAPSED / COMPLETE";
+        if (!ctx.max_init_svc.empty()) {
+            char mbuf[48];
+            snprintf(mbuf, sizeof(mbuf), "MAX-INIT:%s %.2fS", ctx.max_init_svc.c_str(), ctx.max_init_dur_ms / 1000.0);
+            sum1 = sanitize_tail_text(*ctx.rules, std::string("ALL PHASES DONE  ") + mbuf, left_chars);
+        }
+        if (sum1.size() > left_chars) sum1.resize(left_chars);
+        draw_text(px, stride, sum1.c_str(), 24, tree_y, 2, kColorAccent);
+    }
+
+    std::string bl_init_line = "INIT:";
+    for (size_t i = 0; i < ctx.init_ms->size() && i < 4; i++) {
+        char mb[24];
+        snprintf(mb, sizeof(mb), " %s@%.1f", short_init_action((*ctx.init_ms)[i].first).c_str(),
+                 (*ctx.init_ms)[i].second / 1000.0);
+        bl_init_line += mb;
+    }
+    if (ctx.init_ms->empty()) bl_init_line = ctx.bootloader_line;
+    if (bl_init_line.size() > left_chars) bl_init_line.resize(left_chars);
+
+    std::string footer = ctx.footer;
+    if (is_land) {
+        draw_text(px, stride, bl_init_line.c_str(), 24, 360, 2, kColorMuted);
+        draw_resources_block(px, stride, 24, left_r, 384, left_chars, ctx);
+
+        fill_rect(px, stride, 24, 480, left_r, 482, kColorTrack);
+        draw_text(px, stride, "TOP CPU", 24, 488, 2, kColorAccent);
+        if (ctx.sys->top_cpu.empty()) {
+            draw_text(px, stride, "SAMPLING /PROC...", 24, 510, 2, kColorMuted);
+        } else {
+            for (size_t i = 0; i < ctx.sys->top_cpu.size() && i < 3; i++) {
+                char tb[64];
+                snprintf(tb, sizeof(tb), "%zu. %-22s %5.1f%%",
+                         i + 1, ctx.sys->top_cpu[i].comm.c_str(), ctx.sys->top_cpu[i].pct);
+                uint32_t tc = (ctx.sys->top_cpu[i].pct >= 25.0) ? kColorError : kColorPrimary;
+                draw_text(px, stride, tb, 24, 510 + (int)i * 21, 2, tc);
+            }
+        }
+
+        std::string bl_sum = sanitize_tail_text(*ctx.rules, ctx.bootloader_line, left_chars);
+        draw_text(px, stride, bl_sum.c_str(), 24, 584, 2, kColorMuted);
+        if (footer.size() > 30) footer.resize(30);
+        draw_text(px, stride, footer.c_str(), 24, 608, 2, kColorMuted);
+        draw_text(px, stride, ctx.rules_label.c_str(),
+                  left_r - (int)ctx.rules_label.size() * 12, 608, 2, kColorMuted);
+
+        fill_rect(px, stride, 598, 50, 600, bh - 20, kColorTrack);
+
+        const int rx0 = 616;
+        const int rx1 = bw - 24;
+        draw_text(px, stride, "SERVICES", rx0, 50, 2, kColorAccent);
+        for (int i = 0; i < ctx.svc_count; i++) {
+            int col = i % 2;
+            int row = i / 2;
+            int sx = rx0 + col * 324;
+            int sy = 72 + row * 21;
+            char sb[40];
+            if (ctx.svc_start_ms[i] >= 0) {
+                snprintf(sb, sizeof(sb), "%-4s:%-4s @%.1fS",
+                         ctx.short_names[i], ctx.cur_states[i].c_str(), ctx.svc_start_ms[i] / 1000.0);
+            } else {
+                snprintf(sb, sizeof(sb), "%-4s:%-4s", ctx.short_names[i], ctx.cur_states[i].c_str());
+            }
+            uint32_t sc_col = (ctx.cur_states[i] == "RUN") ? kColorAccent
+                : ((ctx.cur_states[i] == "STOP") ? kColorMuted : kColorPrimary);
+            draw_text(px, stride, sb, sx, sy, 2, sc_col);
+        }
+
+        draw_tail_block(px, stride, rx0, rx1, 184, 53, ctx);
+    } else {
+        draw_text(px, stride, bl_init_line.c_str(), 24, 362, 2, kColorMuted);
+
+        fill_rect(px, stride, 24, 386, left_r, 388, kColorTrack);
+        char svc1[72], svc2[72];
+        snprintf(svc1, sizeof(svc1), "SF:%-4s ANIM:%-4s ZYG:%-4s APEX:%-4s ARTD:%-4s",
+                 ctx.cur_states[0].c_str(), ctx.cur_states[1].c_str(), ctx.cur_states[2].c_str(),
+                 ctx.cur_states[3].c_str(), ctx.cur_states[4].c_str());
+        snprintf(svc2, sizeof(svc2), "WPA:%-4s VOLD:%-4s KST2:%-4s INST:%-4s SYS:%-4s",
+                 ctx.cur_states[5].c_str(), ctx.cur_states[6].c_str(), ctx.cur_states[7].c_str(),
+                 ctx.cur_states[8].c_str(), ctx.cur_states[9].c_str());
+        draw_text(px, stride, svc1, 24, 396, 2, kColorPrimary);
+        draw_text(px, stride, svc2, 24, 417, 2, kColorPrimary);
+
+        draw_resources_block(px, stride, 24, left_r, 442, left_chars, ctx);
+
+        std::string top_line = "TOP ";
+        if (ctx.sys->top_cpu.empty()) {
+            top_line += "SAMPLING /PROC...";
+        } else {
+            for (size_t i = 0; i < ctx.sys->top_cpu.size() && i < 3; i++) {
+                char tb[32];
+                std::string nm = ctx.sys->top_cpu[i].comm;
+                if (nm.size() > 10) nm.resize(10);
+                snprintf(tb, sizeof(tb), "%s %.0f%%", nm.c_str(), ctx.sys->top_cpu[i].pct);
+                if (i > 0) top_line += "  ";
+                top_line += tb;
+            }
+        }
+        if (top_line.size() > left_chars) top_line.resize(left_chars);
+        draw_text(px, stride, top_line.c_str(), 24, 536, 2, kColorPrimary);
+
+        if (footer.size() > 40) footer.resize(40);
+        draw_text(px, stride, footer.c_str(), 24, 560, 2, kColorMuted);
+        draw_text(px, stride, ctx.rules_label.c_str(),
+                  left_r - (int)ctx.rules_label.size() * 12, 560, 2, kColorMuted);
+
+        draw_tail_block(px, stride, 24, left_r, 586, 59, ctx);
+    }
+}
+
 }  // namespace
+}  // namespace bootscope
 
 int main(int argc, char** argv) {
+    using namespace bootscope;
+
     bool preview = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--preview") == 0) preview = true;
@@ -629,10 +403,10 @@ int main(int argc, char** argv) {
         if (ps.ptr) gui.ps_start(ps.ptr);
     }
 
-    // Wait briefly for SurfaceFlinger if started right alongside bootanim.
     Sp client;
     Sp display_token;
     Sp sc;
+    Sp surf;
     ANativeWindow* anw = nullptr;
     int64_t sf_deadline = boottime_ms() + 8000;
     while (boottime_ms() < sf_deadline) {
@@ -656,17 +430,22 @@ int main(int argc, char** argv) {
                 display_token = gui.get_internal_token();
             }
             if (display_token.ptr) {
+                Geometry init_geom = query_geometry(gui, display_token);
+                bool init_land = init_geom.width > init_geom.height;
+                set_canvas_bounds(init_land ? kLandWidth : kPortraitWidth,
+                                  init_land ? kLandHeight : kPortraitHeight);
+
                 Blob name{}, metadata{};
                 gui.str8_ctor(&name, kLayerName);
                 gui.lm_ctor(&metadata);
                 Sp null_parent{};
                 uint32_t hint = 0;
                 sc = gui.scc_create(
-                    client.ptr, &name, kWidth, kHeight, 1 /*RGBA_8888*/,
+                    client.ptr, &name, canvas_width(), canvas_height(), 1 /*RGBA_8888*/,
                     0x00000400 /*eOpaque*/, null_parent, &metadata, &hint);
                 gui.str8_dtor(&name);
                 if (sc.ptr) {
-                    Sp surf = gui.sc_get_surface(sc.ptr);
+                    surf = gui.sc_get_surface(sc.ptr);
                     if (surf.ptr) {
                         anw = extract_anw(surf.ptr);
                         if (anw) break;
@@ -678,7 +457,8 @@ int main(int argc, char** argv) {
     }
 
     if (!anw) {
-        fprintf(logf, "exit=surface_unavailable\n");
+        fprintf(logf, "exit=surface_unavailable client=%p token=%p sc=%p surf=%p\n",
+                client.ptr, display_token.ptr, sc.ptr, surf.ptr);
         if (!preview) {
             unlink(kPidPath);
             unlink(kTmpExecPath);
@@ -687,19 +467,39 @@ int main(int argc, char** argv) {
     }
 
     EventState ev_state;
-    pthread_t ev_thread{};
-    bool ev_started = (pthread_create(&ev_thread, nullptr, event_reader_thread, &ev_state) == 0);
-
-    const char* watched[] = {"surfaceflinger", "bootanim", "zygote", "apexd", "artd", "wpa_supplicant"};
-    const char* short_names[] = {"SF", "ANIM", "ZYG", "APEX", "ARTD", "WPA"};
-    std::string prev_states[6];
-    std::string last_transition = "WAITING TRANSITIONS";
+    load_rules(&ev_state.rules);
+    DeviceInfo dev_info = collect_device_info(ev_state.rules);
     std::string bootloader_line = build_bootloader_line();
+    init_phases(&ev_state, bootloader_line);
+
+    pthread_t ev_thread{};
+    pthread_t kmsg_thread{};
+    pthread_t err_thread{};
+    bool ev_started = (pthread_create(&ev_thread, nullptr, event_reader_thread, &ev_state) == 0);
+    bool kmsg_started = (pthread_create(&kmsg_thread, nullptr, kmsg_reader_thread, &ev_state) == 0);
+    bool err_started = (pthread_create(&err_thread, nullptr, err_reader_thread, &ev_state) == 0);
+
+    const char* watched[] = {
+        "surfaceflinger", "bootanim", "zygote", "apexd", "artd",
+        "wpa_supplicant", "vold", "keystore2", "installd", "system_server"
+    };
+    const char* short_names[] = {
+        "SF", "ANIM", "ZYG", "APEX", "ARTD",
+        "WPA", "VOLD", "KST2", "INST", "SYS"
+    };
+    constexpr int kSvcCount = 10;
+    std::string prev_states[kSvcCount];
+    int64_t svc_start_ms[kSvcCount];
+    for (int i = 0; i < kSvcCount; i++) svc_start_ms[i] = -1;
+    std::string last_transition = "WAITING TRANSITIONS";
     PsiSample prev_psi[3];
     int64_t prev_psi_ms = 0;
+    SysSampleState sys_state;
+    SysMetrics sys_metrics;
     Geometry last_geom;
     bool has_geom = false;
     bool first = true;
+    int frame_idx = 0;
 
     int64_t loop_start = boottime_ms();
     bool saw_bootanim = false;
@@ -724,13 +524,13 @@ int main(int argc, char** argv) {
             gui.tx_ctor(&tx);
             if (first) gui.tx_set_layer(&tx, sc, kLayer);
             gui.tx_set_pos(&tx, sc, geom.pos_x, geom.pos_y);
-            gui.tx_set_matrix(&tx, sc, geom.scale, 0.0f, 0.0f, geom.scale);
+            gui.tx_set_matrix(&tx, sc, geom.dsdx, geom.dtdx, geom.dtdy, geom.dsdy);
             if (first) gui.tx_show(&tx, sc);
             gui.tx_apply(&tx, false, false);
 
-            fprintf(logf, "%s%dx%d@%d pos=%d,%d scale=%.3f\n",
+            fprintf(logf, "%s%dx%d@%d rot=%d pos=%d,%d scale=%.3f\n",
                     has_geom ? "layout_changed=" : "layout=",
-                    geom.width, geom.height, geom.refresh_hz,
+                    geom.width, geom.height, geom.refresh_hz, geom.rot_quad,
                     (int)lroundf(geom.pos_x), (int)lroundf(geom.pos_y), geom.scale);
             last_geom = geom;
             has_geom = true;
@@ -738,14 +538,17 @@ int main(int argc, char** argv) {
 
         int64_t now_ms = boottime_ms();
         double uptime_s = now_ms / 1000.0;
-        std::string cur_states[6];
-        for (int i = 0; i < 6; i++) {
+        std::string cur_states[kSvcCount];
+        for (int i = 0; i < 9; i++) {
             cur_states[i] = svc_state(watched[i]);
+            if (cur_states[i] == "RUN" && svc_start_ms[i] < 0) svc_start_ms[i] = now_ms;
             if (!first && prev_states[i] != cur_states[i]) {
                 char tbuf[64];
                 snprintf(tbuf, sizeof(tbuf), "+%.2fS %s %s>%s",
                          uptime_s, short_names[i], prev_states[i].c_str(), cur_states[i].c_str());
                 last_transition = tbuf;
+                push_tail(&ev_state, now_ms, "S", TailKind::Stage,
+                          std::string(short_names[i]) + " " + prev_states[i] + ">" + cur_states[i]);
             }
             prev_states[i] = cur_states[i];
         }
@@ -760,80 +563,212 @@ int main(int argc, char** argv) {
         int mem_pct = compute_psi_pct(cur_psi[2], prev_psi[2], dt_ms);
         for (int i = 0; i < 3; i++) prev_psi[i] = cur_psi[i];
         prev_psi_ms = now_ms;
+        if (first && !cur_psi[0].valid) {
+            push_tail(&ev_state, now_ms, "M", TailKind::ModuleError, "ERR PSI UNAVAIL", "MOD:PSI");
+        }
+        if ((frame_idx % 2) == 0) {
+            sys_metrics = collect_sys_metrics(now_ms, &sys_state);
+        }
 
         StageInfo stage;
+        PhaseNode phases_snap[6];
+        std::string wait_svc;
+        int64_t wait_dur_ms = 0;
+        std::string max_init_svc;
+        int64_t max_init_dur_ms = 0;
+        std::string last_action;
+        std::vector<std::pair<std::string, int64_t>> init_ms_snap;
+        size_t active_cnt = 0;
+        std::vector<TailEntry> visible_tail;
+        size_t max_rows = (canvas_width() == kLandWidth) ? kMaxTailRows : 11;
         {
             std::lock_guard<std::mutex> lock(ev_state.mu);
+            if (cur_states[2] == "RUN" && ev_state.phases[1].state == NodeState::Running) {
+                ev_state.phases[1].state = NodeState::Done;
+                ev_state.phases[1].end_ms = now_ms;
+                if (ev_state.phases[2].state == NodeState::Pending) {
+                    ev_state.phases[2].state = NodeState::Running;
+                    ev_state.phases[2].start_ms = now_ms;
+                }
+            }
+            if (!ev_state.last_init_action.empty() || !ev_state.max_init_svc.empty()) {
+                std::string init_det;
+                if (!ev_state.last_init_action.empty()) {
+                    init_det = "ACT:" + short_init_action(ev_state.last_init_action);
+                }
+                if (!ev_state.max_init_svc.empty()) {
+                    char mbuf[32];
+                    snprintf(mbuf, sizeof(mbuf), "MAX:%s %.2fS",
+                             ev_state.max_init_svc.c_str(), ev_state.max_init_dur_ms / 1000.0);
+                    if (!init_det.empty()) init_det += " ";
+                    init_det += mbuf;
+                }
+                ev_state.phases[1].detail = init_det;
+            }
+            for (int i = 0; i < 6; i++) phases_snap[i] = ev_state.phases[i];
+            for (const auto& a : ev_state.active_svcs) {
+                int64_t d = now_ms - a.start_ms;
+                if (d > wait_dur_ms) {
+                    wait_dur_ms = d;
+                    wait_svc = a.name;
+                }
+            }
+            active_cnt = ev_state.active_svcs.size();
+            last_action = ev_state.last_init_action;
+            max_init_svc = ev_state.max_init_svc;
+            max_init_dur_ms = ev_state.max_init_dur_ms;
+            init_ms_snap = ev_state.init_milestones;
             stage = ev_state.framework_stage;
+            size_t total = ev_state.tail.size();
+            size_t start_idx = total > max_rows ? (total - max_rows) : 0;
+            for (size_t i = start_idx; i < total; i++) {
+                visible_tail.push_back(ev_state.tail[i]);
+            }
         }
         if (stage.step == 0) {
             stage = infer_native_stage(cur_states[3], cur_states[2]);
         }
+        cur_states[9] = (stage.step >= 4) ? "RUN" : "-";
+        if (cur_states[9] == "RUN" && svc_start_ms[9] < 0) svc_start_ms[9] = now_ms;
+        prev_states[9] = cur_states[9];
+
+        int expanded_idx = -1;
+        for (int i = 5; i >= 0; i--) {
+            if (phases_snap[i].state == NodeState::Running) {
+                expanded_idx = i;
+                break;
+            }
+        }
+
+        auto phase_dur_str = [&](int idx) -> std::string {
+            const PhaseNode& p = phases_snap[idx];
+            if (p.start_ms < 0) return "--";
+            int64_t end = (p.state == NodeState::Done && p.end_ms >= p.start_ms) ? p.end_ms : now_ms;
+            if (end < p.start_ms) return "--";
+            char b[16];
+            snprintf(b, sizeof(b), "%.2fS", (end - p.start_ms) / 1000.0);
+            return b;
+        };
+
+        std::string exp_line1;
+        std::string exp_line2;
+        uint32_t exp_col2 = kColorMuted;
+        std::string psi_compact;
+        if (cpu_pct >= 0 && io_pct >= 0 && mem_pct >= 0) {
+            char pb[32];
+            snprintf(pb, sizeof(pb), "PSI C:%2d%% I:%2d%% M:%2d%%", cpu_pct, io_pct, mem_pct);
+            psi_compact = pb;
+        }
+        if (expanded_idx == 1) {
+            std::string act = last_action.empty() ? "EARLY-INIT" : short_init_action(last_action);
+            char b1[96];
+            if (!max_init_svc.empty()) {
+                snprintf(b1, sizeof(b1), "ACT:%s  SVC:%zu  MAX:%s %.2fS",
+                         act.c_str(), active_cnt, max_init_svc.c_str(), max_init_dur_ms / 1000.0);
+            } else {
+                snprintf(b1, sizeof(b1), "ACT:%s  ACTIVE_SVC:%zu", act.c_str(), active_cnt);
+            }
+            exp_line1 = sanitize_tail_text(ev_state.rules, b1, 57);
+            if (!wait_svc.empty() && wait_dur_ms >= 200) {
+                char b2[64];
+                snprintf(b2, sizeof(b2), "WAIT:%s %.1fS", wait_svc.c_str(), wait_dur_ms / 1000.0);
+                exp_line2 = sanitize_tail_text(ev_state.rules, b2, 34);
+                exp_col2 = (wait_dur_ms >= 3000) ? kColorError : kColorPrimary;
+            } else {
+                exp_line2 = "WAIT:IDLE";
+                exp_col2 = kColorMuted;
+            }
+        } else if (expanded_idx == 2) {
+            std::string apex_st = get_prop("apexd.status");
+            if (apex_st.empty()) apex_st = cur_states[3];
+            exp_line1 = sanitize_tail_text(
+                ev_state.rules,
+                "ZYG:" + cur_states[2] + "  APEX:" + apex_st + "  ARTD:" + cur_states[4],
+                57);
+            if (!wait_svc.empty() && wait_dur_ms >= 200) {
+                char b2[64];
+                snprintf(b2, sizeof(b2), "WAIT:%s %.1fS", wait_svc.c_str(), wait_dur_ms / 1000.0);
+                exp_line2 = sanitize_tail_text(ev_state.rules, b2, 34);
+                exp_col2 = (wait_dur_ms >= 3000) ? kColorError : kColorPrimary;
+            } else {
+                exp_line2 = "WAIT:BOOT_PROGRESS_START";
+                exp_col2 = kColorPrimary;
+            }
+        } else if (expanded_idx == 3) {
+            exp_line1 = sanitize_tail_text(
+                ev_state.rules,
+                "STEP:" + stage.label + "  INIT:" + phase_dur_str(1) + "  ZYG:" + phase_dur_str(2),
+                57);
+            exp_line2 = "PRELOADING FRAMEWORK CLASSES";
+            exp_col2 = kColorPrimary;
+        } else if (expanded_idx == 4) {
+            exp_line1 = sanitize_tail_text(
+                ev_state.rules,
+                "STEP:" + stage.label + "  ARTD:" + cur_states[4] + "  PRE:" + phase_dur_str(3),
+                57);
+            exp_line2 = (io_pct >= 30) ? "PKG SCAN IO BOUND" : "PKG/DEX VERIFY SCAN";
+            exp_col2 = (io_pct >= 30 || cpu_pct >= 65) ? kColorError : kColorPrimary;
+        } else if (expanded_idx == 5) {
+            exp_line1 = sanitize_tail_text(
+                ev_state.rules,
+                "STEP:" + stage.label + "  PMS:" + phase_dur_str(4) + "  WPA:" + cur_states[5],
+                57);
+            std::string bc = get_prop("sys.boot_completed");
+            std::string ae = get_prop("service.bootanim.exit");
+            exp_line2 = "BC=" + (bc.empty() ? std::string("0") : bc)
+                + " ANIM_EXIT=" + (ae.empty() ? std::string("0") : ae);
+            exp_col2 = kColorPrimary;
+        } else if (expanded_idx == 0) {
+            exp_line1 = sanitize_tail_text(ev_state.rules, bootloader_line, 57);
+            exp_line2 = "WAITING EARLY INIT";
+        }
+
+        std::string footer;
+        if (last_transition == "WAITING TRANSITIONS") {
+            std::string bc = get_prop("sys.boot_completed");
+            std::string ae = get_prop("service.bootanim.exit");
+            footer = "BC=" + (bc.empty() ? std::string("0") : bc)
+                + " ANIM_EXIT=" + (ae.empty() ? std::string("0") : ae);
+        } else {
+            footer = "LAST " + last_transition;
+        }
+        char rbuf[24];
+        snprintf(rbuf, sizeof(rbuf), "RULES:%s/%zu", ev_state.rules.source.c_str(), ev_state.rules.count);
+
+        RenderContext ctx;
+        ctx.preview = preview;
+        ctx.frame_idx = frame_idx;
+        ctx.now_ms = now_ms;
+        ctx.uptime_s = uptime_s;
+        ctx.geom = &geom;
+        ctx.dev_info = &dev_info;
+        ctx.stage = &stage;
+        ctx.phases = phases_snap;
+        ctx.expanded_idx = expanded_idx;
+        ctx.exp_line1 = exp_line1;
+        ctx.exp_line2 = exp_line2;
+        ctx.exp_col2 = exp_col2;
+        ctx.max_init_svc = max_init_svc;
+        ctx.max_init_dur_ms = max_init_dur_ms;
+        ctx.psi_compact = psi_compact;
+        ctx.cpu_pct = cpu_pct;
+        ctx.io_pct = io_pct;
+        ctx.sys = &sys_metrics;
+        ctx.cur_states = cur_states;
+        ctx.svc_start_ms = svc_start_ms;
+        ctx.short_names = short_names;
+        ctx.svc_count = kSvcCount;
+        ctx.init_ms = &init_ms_snap;
+        ctx.bootloader_line = bootloader_line;
+        ctx.footer = footer;
+        ctx.rules_label = rbuf;
+        ctx.rules = &ev_state.rules;
+        ctx.tail = &visible_tail;
+        ctx.max_rows = max_rows;
 
         ANativeWindow_Buffer buf{};
         if (ANativeWindow_lock(anw, &buf, nullptr) == 0 && buf.bits) {
-            uint32_t* px = (uint32_t*)buf.bits;
-            fill_rect(px, buf.stride, 0, 0, kWidth, kHeight, kColorBg);
-            fill_rect(px, buf.stride, 0, 0, 8, kHeight, kColorAccent);
-
-            draw_text(px, buf.stride, preview ? "BOOTSCOPE / PREVIEW" : "BOOTSCOPE / BOOT", 24, 24, 3, kColorAccent);
-
-            char mode_buf[32];
-            if (geom.refresh_hz > 0) {
-                snprintf(mode_buf, sizeof(mode_buf), "%dX%d@%d", geom.width, geom.height, geom.refresh_hz);
-            } else {
-                snprintf(mode_buf, sizeof(mode_buf), "%dX%d", geom.width, geom.height);
-            }
-            int mode_x = kWidth - 24 - (int)strlen(mode_buf) * 18;
-            if (mode_x < 384) mode_x = 384;
-            draw_text(px, buf.stride, mode_buf, mode_x, 24, 3, kColorMuted);
-
-            char meta_buf[48];
-            snprintf(meta_buf, sizeof(meta_buf), "UPTIME %-7.2fS  STAGE %d/%d", uptime_s, stage.step, kStageTotal);
-            draw_text(px, buf.stride, meta_buf, 24, 66, 3, kColorPrimary);
-
-            const int bar_left = 24, bar_top = 98, bar_right = kWidth - 24, bar_bottom = 110;
-            fill_rect(px, buf.stride, bar_left, bar_top, bar_right, bar_bottom, kColorTrack);
-            if (stage.step > 0) {
-                int filled = bar_left + (int)lroundf((bar_right - bar_left) * (stage.step / (float)kStageTotal));
-                fill_rect(px, buf.stride, bar_left, bar_top, filled, bar_bottom, kColorAccent);
-            }
-
-            std::string stage_line = stage.raw_ms.empty()
-                ? stage.label
-                : (stage.label + "  " + stage.raw_ms + "MS");
-            draw_text(px, buf.stride, stage_line.c_str(), 24, 126, 3, kColorAccent);
-
-            char row1[48], row2[48];
-            snprintf(row1, sizeof(row1), "SF:%-4s ANIM:%-4s ZYG:%-4s",
-                     cur_states[0].c_str(), cur_states[1].c_str(), cur_states[2].c_str());
-            snprintf(row2, sizeof(row2), "APEX:%-4s ARTD:%-4s WPA:%-4s",
-                     cur_states[3].c_str(), cur_states[4].c_str(), cur_states[5].c_str());
-            draw_text(px, buf.stride, row1, 24, 156, 3, kColorPrimary);
-            draw_text(px, buf.stride, row2, 24, 186, 3, kColorPrimary);
-
-            char psi_buf[48];
-            if (cpu_pct >= 0 && io_pct >= 0 && mem_pct >= 0) {
-                snprintf(psi_buf, sizeof(psi_buf), "PSI CPU:%3d%% IO:%3d%% MEM:%3d%%",
-                         cpu_pct, io_pct, mem_pct);
-            } else {
-                snprintf(psi_buf, sizeof(psi_buf), "PSI N/A");
-            }
-            draw_text(px, buf.stride, psi_buf, 24, 218, 3, kColorAccent);
-            draw_text(px, buf.stride, bootloader_line.c_str(), 24, 248, 3, kColorMuted);
-
-            std::string footer;
-            if (last_transition == "WAITING TRANSITIONS") {
-                std::string bc = get_prop("sys.boot_completed");
-                std::string ae = get_prop("service.bootanim.exit");
-                footer = "BC=" + (bc.empty() ? std::string("0") : bc)
-                    + " ANIM_EXIT=" + (ae.empty() ? std::string("0") : ae);
-            } else {
-                footer = "LAST " + last_transition;
-            }
-            if (footer.size() > 35) footer.resize(35);
-            draw_text(px, buf.stride, footer.c_str(), 24, 280, 3, kColorMuted);
-
+            draw_dashboard((uint32_t*)buf.bits, buf.stride, ctx);
             ANativeWindow_unlockAndPost(anw);
         }
 
@@ -841,6 +776,7 @@ int main(int argc, char** argv) {
             fprintf(logf, "first_frame_submitted_ms=%lld\n", (long long)boottime_ms());
             first = false;
         }
+        frame_idx++;
         usleep(250000);
     }
 
@@ -851,11 +787,12 @@ int main(int argc, char** argv) {
     ev_state.stop = true;
     {
         std::lock_guard<std::mutex> lock(ev_state.mu);
-        if (ev_state.logcat_pid > 0) {
-            kill(ev_state.logcat_pid, SIGKILL);
-        }
+        if (ev_state.logcat_pid > 0) kill(ev_state.logcat_pid, SIGKILL);
+        if (ev_state.err_logcat_pid > 0) kill(ev_state.err_logcat_pid, SIGKILL);
     }
     if (ev_started) pthread_join(ev_thread, nullptr);
+    if (kmsg_started) pthread_join(kmsg_thread, nullptr);
+    if (err_started) pthread_join(err_thread, nullptr);
 
     if (gui.tx_hide && sc.ptr) {
         Blob tx{};

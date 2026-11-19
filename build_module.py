@@ -136,16 +136,18 @@ def build_display_dex(root: Path, sdk: Path, platform: str | None, build_tools: 
 
 
 def build_early_native(root: Path, sdk: Path, explicit_ndk: Path | None) -> Path:
-    """Compile display/bootscope_early.cpp into dist/bootscope-display/bootscope_early."""
+    """Compile display/bootscope_early.cpp and display/early/*.cpp into dist/bootscope-display/bootscope_early."""
     ndk = resolve_ndk(sdk, explicit_ndk)
     clang, strip = resolve_ndk_clang(ndk)
     output = root / 'dist' / 'bootscope-display'
     output.mkdir(parents=True, exist_ok=True)
     binary = output / 'bootscope_early'
-    source = root / 'display' / 'bootscope_early.cpp'
+    display_dir = root / 'display'
+    sources = [display_dir / 'bootscope_early.cpp'] + sorted((display_dir / 'early').glob('*.cpp'))
     subprocess.run(
         [str(clang), '-O2', '-Wall', '-Wextra', '-static-libstdc++',
-         '-lnativewindow', '-ldl', '-lm', '-o', str(binary), str(source)],
+         f'-I{display_dir}', '-lnativewindow', '-ldl', '-lm', '-o', str(binary),
+         *[str(s) for s in sources]],
         check=True,
     )
     if strip.is_file():
@@ -185,11 +187,15 @@ def main() -> None:
 
     text_entries = [
         ('module.prop', 0o100644),
+        ('action.sh', 0o100755),
         ('service.sh', 0o100755),
         ('probe.sh', 0o100755),
     ]
     if not args.no_display:
-        text_entries.append(('display.sh', 0o100755))
+        text_entries.extend([
+            ('display.sh', 0o100755),
+            ('rules.conf', 0o100644),
+        ])
         if early_path is not None:
             text_entries.extend([
                 ('customize.sh', 0o100755),

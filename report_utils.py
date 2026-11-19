@@ -13,6 +13,7 @@ from analyze_probe import (
     read_init_events,
     read_proc_samples,
     read_psi_samples,
+    read_qcom_kpi,
     read_samples,
 )
 
@@ -46,6 +47,9 @@ def load_boot_run(samples_path: Path) -> dict:
     display_renderer = _read_kv_file(renderer_path)
     display_status = _read_kv_file(run_dir / 'display-status.txt')
 
+    bootloader = samples[0][1].get('bootloader_boottime', {})
+    if not bootloader:
+        bootloader = read_qcom_kpi(run_dir / 'bootloader-kpi.tsv')
     label = metadata.get('boot_id') or run_dir.name or samples_path.name
     return {
         'label': label,
@@ -53,7 +57,7 @@ def load_boot_run(samples_path: Path) -> dict:
         'metadata': metadata,
         'samples': samples,
         'transitions': collect_transitions(samples),
-        'bootloader': samples[0][1].get('bootloader_boottime', {}),
+        'bootloader': bootloader,
         'init_stages': samples[-1][1].get('init_stages', ()),
         'init_events': init_events,
         'boot_events': boot_events,

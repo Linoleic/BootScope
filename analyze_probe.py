@@ -127,6 +127,38 @@ def read_init_events(path):
     return events
 
 
+def read_qcom_kpi(path):
+    """Read Qualcomm boot_stats KPI metrics from bootloader-kpi.tsv into derived ms/raw dict."""
+    if not path.is_file():
+        return {}
+    raw = {}
+    for line in path.read_text(encoding='utf-8').splitlines():
+        parts = line.split('\t')
+        if len(parts) != 2:
+            continue
+        k, v = parts[0].strip(), parts[1].strip()
+        if not k or not v.isdecimal():
+            continue
+        raw[k] = int(v)
+    if not raw:
+        return {}
+    out = {}
+    freq = raw.get('mpm_freq', 0)
+    bl_start = raw.get('bl_start')
+    bl_end = raw.get('bl_end')
+    bl_load = raw.get('bl_load_kernel')
+    if freq > 0 and bl_start is not None and bl_end is not None and bl_end >= bl_start:
+        out['QCOM_BL_TOTAL_MS'] = round((bl_end - bl_start) * 1000.0 / freq)
+        if bl_load is not None and bl_start <= bl_load <= bl_end:
+            out['QCOM_BL_PRE_MS'] = round((bl_load - bl_start) * 1000.0 / freq)
+            out['QCOM_BL_KL_MS'] = round((bl_end - bl_load) * 1000.0 / freq)
+        out['QCOM_MPM_FREQ_HZ'] = freq
+    else:
+        for k, v in raw.items():
+            out[f'qcom_{k}'] = v
+    return out
+
+
 def read_psi_samples(path):
     """Read psi.tsv entries emitted by probe.sh."""
     if not path.is_file():
@@ -359,7 +391,7 @@ def collect_transitions(samples):
 def _print_bootloader_boottime(bl):
     if not bl:
         return
-    print('\nBootloader 阶段指标（ro.boot.boottime*，原始数值，含义由设备 Bootloader 定义）')
+    print('\nBootloader 阶段指标（ro.boot.boottime* / 高通 boot_stats KPI）')
     items = [f'{k}={v}' for k, v in bl.items()]
     for idx in range(0, len(items), 6):
         print('  ' + ', '.join(items[idx:idx + 6]))
@@ -500,7 +532,10 @@ def print_single_report(samples_path):
             stamp = f'{ns / 1e9:.3f} 秒' if ns is not None else '未知'
             print(f"{name}: 首次采样状态={svc['state']}，系统记录的首次启动={stamp}")
 
-    _print_bootloader_boottime(samples[0][1].get('bootloader_boottime', {}))
+    bl = samples[0][1].get('bootloader_boottime', {})
+    if not bl:
+        bl = read_qcom_kpi(samples_path.with_name('bootloader-kpi.tsv'))
+    _print_bootloader_boottime(bl)
     _print_init_stage_properties(samples[-1][1].get('init_stages', ()))
     _print_init_events_summary(read_init_events(samples_path.with_name('init-events.tsv')))
     _print_psi_summary(compute_psi_intervals(read_psi_samples(samples_path.with_name('psi.tsv'))))
