@@ -90,6 +90,7 @@ void push_tail(
     EventState* st, int64_t ts_ms, const char* source, TailKind kind,
     const std::string& raw_text, const std::string& group = "");
 
+bool is_resident_daemon(const std::string& svc);
 bool is_stack_trace_noise(const char* msg);
 void* kmsg_reader_thread(void* arg);
 void* err_reader_thread(void* arg);

@@ -378,12 +378,16 @@ int main(int argc, char** argv) {
     bool preview = false;
     bool replay_mode = false;
     std::string replay_dir;
+    float replay_speed = 1.0f;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--preview") == 0) preview = true;
         else if (strcmp(argv[i], "--replay") == 0 && i + 1 < argc) {
             replay_mode = true;
             preview = true;
             replay_dir = argv[++i];
+        } else if (strcmp(argv[i], "--speed") == 0 && i + 1 < argc) {
+            float sp = (float)atof(argv[++i]);
+            if (sp >= 0.25f && sp <= 10.0f) replay_speed = sp;
         }
     }
     if (!preview && access(kDisableMarker, F_OK) == 0) {
@@ -496,26 +500,42 @@ int main(int argc, char** argv) {
             }
             return 0;
         }
-        if (!preview && !replay_mode && (sf_wait_tick % 5) == 0) {
+        if (!preview && !replay_mode) {
             int64_t t_ms = boottime_ms();
             std::string pre_svcs[kSvcCount];
+            bool pre_changed = false;
             for (int i = 0; i < 9; i++) {
                 pre_svcs[i] = svc_state(watched[i]);
                 if (pre_svcs[i] == "RUN" && svc_start_ms[i] < 0) svc_start_ms[i] = t_ms;
+                if (prev_states[i] != pre_svcs[i]) pre_changed = true;
+                prev_states[i] = pre_svcs[i];
             }
             pre_svcs[9] = "-";
-            PsiSample cur_psi[3];
-            read_psi_file("/proc/pressure/cpu", &cur_psi[0]);
-            read_psi_file("/proc/pressure/io", &cur_psi[1]);
-            read_psi_file("/proc/pressure/memory", &cur_psi[2]);
-            int64_t dt_ms = prev_psi_ms > 0 ? (t_ms - prev_psi_ms) : 0;
-            int c_pct = compute_psi_pct(cur_psi[0], prev_psi[0], dt_ms);
-            int i_pct = compute_psi_pct(cur_psi[1], prev_psi[1], dt_ms);
-            int m_pct = compute_psi_pct(cur_psi[2], prev_psi[2], dt_ms);
-            for (int i = 0; i < 3; i++) prev_psi[i] = cur_psi[i];
-            prev_psi_ms = t_ms;
-            sys_metrics = collect_sys_metrics(t_ms, &sys_state);
-            trace_metric(t_ms, c_pct, i_pct, m_pct, sys_metrics, pre_svcs, kSvcCount);
+            if (pre_svcs[2] == "RUN") {
+                std::lock_guard<std::mutex> lock(ev_state.mu);
+                if (ev_state.phases[1].state == NodeState::Running) {
+                    ev_state.phases[1].state = NodeState::Done;
+                    ev_state.phases[1].end_ms = t_ms;
+                    if (ev_state.phases[2].state == NodeState::Pending) {
+                        ev_state.phases[2].state = NodeState::Running;
+                        ev_state.phases[2].start_ms = t_ms;
+                    }
+                }
+            }
+            if ((sf_wait_tick % 5) == 0 || pre_changed) {
+                PsiSample cur_psi[3];
+                read_psi_file("/proc/pressure/cpu", &cur_psi[0]);
+                read_psi_file("/proc/pressure/io", &cur_psi[1]);
+                read_psi_file("/proc/pressure/memory", &cur_psi[2]);
+                int64_t dt_ms = prev_psi_ms > 0 ? (t_ms - prev_psi_ms) : 0;
+                int c_pct = compute_psi_pct(cur_psi[0], prev_psi[0], dt_ms);
+                int i_pct = compute_psi_pct(cur_psi[1], prev_psi[1], dt_ms);
+                int m_pct = compute_psi_pct(cur_psi[2], prev_psi[2], dt_ms);
+                for (int i = 0; i < 3; i++) prev_psi[i] = cur_psi[i];
+                prev_psi_ms = t_ms;
+                sys_metrics = collect_sys_metrics(t_ms, &sys_state);
+                trace_metric(t_ms, c_pct, i_pct, m_pct, sys_metrics, pre_svcs, kSvcCount);
+            }
         }
         sf_wait_tick++;
 
@@ -577,12 +597,14 @@ int main(int argc, char** argv) {
     bool has_geom = false;
     bool first = true;
     int frame_idx = 0;
+    PhaseNode prev_traced_phases[6];
+    bool has_traced_phases = false;
 
     int64_t loop_start = boottime_ms();
     bool saw_bootanim = false;
-    constexpr int kReplayTotalFrames = 45;
-    int64_t deadline = loop_start + (replay_mode ? 15000 : (preview ? 4000 : 30000));
-    while (replay_mode ? (frame_idx <= kReplayTotalFrames) : (boottime_ms() < deadline)) {
+    int64_t deadline = loop_start + (preview ? 4000 : 30000);
+    bool replay_finished = false;
+    while (replay_mode ? !replay_finished : (boottime_ms() < deadline)) {
         if (!preview) {
             if (get_prop("init.svc.bootanim") == "running") saw_bootanim = true;
             if (get_prop("service.bootanim.exit") == "1" || get_prop("sys.boot_completed") == "1") {
@@ -618,9 +640,16 @@ int main(int argc, char** argv) {
             has_geom = true;
         }
 
-        int64_t now_ms = replay_mode
-            ? (replay_data.end_ms * frame_idx / kReplayTotalFrames)
-            : boottime_ms();
+        int64_t now_ms = boottime_ms();
+        if (replay_mode) {
+            int64_t step_ms = replay_data.start_ms + (int64_t)llround((double)frame_idx * 250.0 * (double)replay_speed);
+            if (step_ms >= replay_data.end_ms) {
+                now_ms = replay_data.end_ms;
+                replay_finished = true;
+            } else {
+                now_ms = step_ms;
+            }
+        }
         double uptime_s = now_ms / 1000.0;
         std::string cur_states[kSvcCount];
         int cpu_pct = -1, io_pct = -1, mem_pct = -1;
@@ -636,6 +665,7 @@ int main(int argc, char** argv) {
         std::vector<TailEntry> visible_tail;
         size_t max_rows = (canvas_width() == kLandWidth) ? kMaxTailRows : 11;
 
+        bool svc_changed = false;
         if (replay_mode) {
             std::vector<TailEntry> full_tail;
             build_replay_snapshot(
@@ -654,6 +684,7 @@ int main(int argc, char** argv) {
                 cur_states[i] = svc_state(watched[i]);
                 if (cur_states[i] == "RUN" && svc_start_ms[i] < 0) svc_start_ms[i] = now_ms;
                 if (!first && prev_states[i] != cur_states[i]) {
+                    svc_changed = true;
                     char tbuf[64];
                     snprintf(tbuf, sizeof(tbuf), "+%.2fS %s %s>%s",
                              uptime_s, short_names[i], prev_states[i].c_str(), cur_states[i].c_str());
@@ -874,8 +905,24 @@ int main(int argc, char** argv) {
             ANativeWindow_unlockAndPost(anw);
         }
 
-        if (!replay_mode && (frame_idx % 2) == 0) {
-            trace_metric(now_ms, cpu_pct, io_pct, mem_pct, sys_metrics, cur_states, kSvcCount);
+        if (!preview && !replay_mode) {
+            if (svc_changed || (frame_idx % 2) == 0) {
+                trace_metric(now_ms, cpu_pct, io_pct, mem_pct, sys_metrics, cur_states, kSvcCount);
+            }
+            for (int i = 0; i < 6; i++) {
+                bool changed = !has_traced_phases
+                    || prev_traced_phases[i].state != phases_snap[i].state
+                    || prev_traced_phases[i].start_ms != phases_snap[i].start_ms
+                    || prev_traced_phases[i].end_ms != phases_snap[i].end_ms
+                    || prev_traced_phases[i].detail != phases_snap[i].detail;
+                if (changed) {
+                    trace_phase(now_ms, i, (int)phases_snap[i].state,
+                                phases_snap[i].start_ms, phases_snap[i].end_ms,
+                                phases_snap[i].detail);
+                    prev_traced_phases[i] = phases_snap[i];
+                }
+            }
+            has_traced_phases = true;
         }
 
         if (first) {
@@ -885,7 +932,9 @@ int main(int argc, char** argv) {
             first = false;
         }
         frame_idx++;
-        usleep(replay_mode ? 150000 : 250000);
+        if (!(replay_mode && replay_finished)) {
+            usleep(250000);
+        }
     }
 
     if (replay_mode) {

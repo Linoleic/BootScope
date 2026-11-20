@@ -73,6 +73,17 @@ void trace_bl(int64_t ts_ms, const std::string& bl_line, int64_t total_ms) {
     write_trace_line(line);
 }
 
+void trace_phase(
+        int64_t ts_ms, int idx, int state, int64_t start_ms, int64_t end_ms,
+        const std::string& detail) {
+    if (!trace_is_open()) return;
+    char buf[96];
+    snprintf(buf, sizeof(buf), "%lld\tPHASE\t%d\t%d\t%lld\t%lld",
+             (long long)ts_ms, idx, state, (long long)start_ms, (long long)end_ms);
+    std::string line = std::string(buf) + "\t" + clean_tsv_field(detail);
+    write_trace_line(line);
+}
+
 void trace_tail(int64_t ts_ms, const char* source, const char* kind, const std::string& text) {
     if (!trace_is_open()) return;
     std::string line = std::to_string(ts_ms) + "\tTAIL\t" + source + "\t" + kind

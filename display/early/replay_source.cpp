@@ -58,6 +58,22 @@ static std::string map_sample_svc_state(const std::string& v) {
 bool load_replay_data(const std::string& dir, ReplayData* out) {
     *out = ReplayData{};
     double max_sec = 0.0;
+    int64_t first_frame_ms = -1;
+    int64_t released_ms = -1;
+    int64_t bootanim_done_ms = -1;
+
+    if (FILE* f = fopen(join_path(dir, "display-renderer.txt").c_str(), "r")) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            long long v = 0;
+            if (sscanf(line, "first_frame_submitted_ms=%lld", &v) == 1 && v >= 0 && v <= 300000) {
+                first_frame_ms = (int64_t)v;
+            } else if (sscanf(line, "released_ms=%lld", &v) == 1 && v >= 0 && v <= 300000) {
+                released_ms = (int64_t)v;
+            }
+        }
+        fclose(f);
+    }
 
     if (FILE* f = fopen(join_path(dir, "metadata.txt").c_str(), "r")) {
         char line[256];
@@ -217,10 +233,22 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
             if (ts_ms < 0 || ts_ms > 300000) continue;
             if (ts_ms / 1000.0 > max_sec) max_sec = ts_ms / 1000.0;
             const std::string& rtype = cols[1];
-            if (rtype == "BL" && cols.size() >= 4) {
+            if (rtype == "LIFE") {
+                if (cols[2] == "first_frame" && first_frame_ms < 0) first_frame_ms = ts_ms;
+                else if (cols[2] == "released") released_ms = ts_ms;
+            } else if (rtype == "BL" && cols.size() >= 4) {
                 int64_t bms = strtoll(cols[2].c_str(), nullptr, 10);
                 if (bms >= 0) out->bl_total_ms = bms;
                 if (!cols[3].empty()) out->bl_line = cols[3];
+            } else if (rtype == "PHASE" && cols.size() >= 7) {
+                ReplayTracePhase tp;
+                tp.ts_ms = ts_ms;
+                tp.idx = atoi(cols[2].c_str());
+                tp.state = atoi(cols[3].c_str());
+                tp.start_ms = strtoll(cols[4].c_str(), nullptr, 10);
+                tp.end_ms = strtoll(cols[5].c_str(), nullptr, 10);
+                tp.detail = cols[6];
+                out->trace_phases.push_back(std::move(tp));
             } else if (rtype == "TAIL" && cols.size() >= 5) {
                 ReplayTraceTail tt;
                 tt.ts_ms = ts_ms;
@@ -266,15 +294,30 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
             }
         }
         fclose(f);
+        std::sort(out->trace_phases.begin(), out->trace_phases.end(),
+                  [](const ReplayTracePhase& a, const ReplayTracePhase& b) { return a.ts_ms < b.ts_ms; });
         std::sort(out->trace_tails.begin(), out->trace_tails.end(),
                   [](const ReplayTraceTail& a, const ReplayTraceTail& b) { return a.ts_ms < b.ts_ms; });
         std::sort(out->trace_metrics.begin(), out->trace_metrics.end(),
                   [](const ReplayTraceMetric& a, const ReplayTraceMetric& b) { return a.ts_ms < b.ts_ms; });
-        out->has_trace = !out->trace_tails.empty() || !out->trace_metrics.empty();
+        out->has_trace = !out->trace_tails.empty() || !out->trace_metrics.empty() || !out->trace_phases.empty();
     }
 
-    out->end_ms = (int64_t)llround(max_sec * 1000.0);
-    if (out->end_ms < 5000) out->end_ms = 5000;
+    for (const auto& bev : out->boot_events) {
+        if ((bev.tag == "wm_boot_animation_done" || bev.tag == "sf_stop_bootanim") && bev.ts_ms > bootanim_done_ms) {
+            bootanim_done_ms = bev.ts_ms;
+        }
+    }
+
+    out->start_ms = (first_frame_ms >= 0) ? first_frame_ms : 0;
+    if (released_ms > out->start_ms) {
+        out->end_ms = released_ms;
+    } else if (bootanim_done_ms > out->start_ms) {
+        out->end_ms = bootanim_done_ms + 200;
+    } else {
+        out->end_ms = (int64_t)llround(max_sec * 1000.0);
+    }
+    if (out->end_ms <= out->start_ms) out->end_ms = out->start_ms + 5000;
     out->loaded = out->has_trace || !out->init_events.empty() || !out->boot_events.empty() || !out->svc_points.empty();
     return out->loaded;
 }
@@ -351,7 +394,9 @@ void build_replay_snapshot(
                 phases_out[2].state = NodeState::Running;
                 phases_out[2].start_ms = ev.ts_ms;
             }
-            active.push_back({ev.name, ev.ts_ms});
+            if (!is_resident_daemon(ev.name)) {
+                active.push_back({ev.name, ev.ts_ms});
+            }
             push_replay_tail(ev.ts_ms, "K", TailKind::Info, "+" + ev.name);
         } else if (ev.kind == "exit") {
             active.erase(std::remove_if(active.begin(), active.end(),
@@ -361,7 +406,7 @@ void build_replay_snapshot(
             if (tp) {
                 double took_s = atof(tp + 5);
                 int64_t dur = (int64_t)llround(took_s * 1000.0);
-                if (dur > *max_init_dur_out) {
+                if (!is_resident_daemon(ev.name) && dur > *max_init_dur_out) {
                     *max_init_dur_out = dur;
                     *max_init_svc_out = ev.name;
                 }
@@ -401,21 +446,72 @@ void build_replay_snapshot(
                 if (phases_out[3].start_ms < 0) phases_out[3].start_ms = bev.ts_ms;
                 phases_out[3].state = NodeState::Done;
                 phases_out[3].end_ms = bev.ts_ms;
+                phases_out[3].detail = "PRELOADED";
                 phases_out[4].state = NodeState::Running;
                 phases_out[4].start_ms = bev.ts_ms;
+                phases_out[4].detail = "WAITING SYSTEM_RUN";
+            } else if (bev.tag == "boot_progress_system_run") {
+                if (phases_out[3].state != NodeState::Done) {
+                    if (phases_out[3].start_ms < 0) phases_out[3].start_ms = bev.ts_ms;
+                    phases_out[3].state = NodeState::Done;
+                    phases_out[3].end_ms = bev.ts_ms;
+                }
+                phases_out[4].state = NodeState::Running;
+                if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
+                phases_out[4].detail = "SYSTEM_RUN";
+            } else if (bev.tag == "boot_progress_pms_start") {
+                phases_out[4].state = NodeState::Running;
+                if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
+                phases_out[4].detail = "PMS_START";
+            } else if (bev.tag == "boot_progress_pms_system_scan_start") {
+                phases_out[4].state = NodeState::Running;
+                if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
+                phases_out[4].detail = "SYSTEM_PKG_SCAN";
+            } else if (bev.tag == "boot_progress_pms_data_scan_start") {
+                phases_out[4].state = NodeState::Running;
+                if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
+                phases_out[4].detail = "DATA_PKG_SCAN";
+            } else if (bev.tag == "boot_progress_pms_scan_end") {
+                phases_out[4].detail = "SCAN_END";
             } else if (bev.tag == "boot_progress_pms_ready") {
                 if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
                 phases_out[4].state = NodeState::Done;
                 phases_out[4].end_ms = bev.ts_ms;
+                phases_out[4].detail = "PMS_READY";
                 phases_out[5].state = NodeState::Running;
                 phases_out[5].start_ms = bev.ts_ms;
-            } else if (bev.tag == "boot_progress_enable_screen" || bev.tag == "wm_boot_animation_done") {
+                phases_out[5].detail = "WAITING AMS_READY";
+            } else if (bev.tag == "boot_progress_ams_ready") {
+                if (phases_out[4].state != NodeState::Done) {
+                    if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
+                    phases_out[4].state = NodeState::Done;
+                    phases_out[4].end_ms = bev.ts_ms;
+                }
+                phases_out[5].state = NodeState::Running;
+                if (phases_out[5].start_ms < 0) phases_out[5].start_ms = bev.ts_ms;
+                phases_out[5].detail = "AMS_READY -> SCREEN";
+            } else if (bev.tag == "boot_progress_enable_screen"
+                    || bev.tag == "sf_stop_bootanim"
+                    || bev.tag == "wm_boot_animation_done") {
                 if (phases_out[5].start_ms < 0) phases_out[5].start_ms = bev.ts_ms;
                 phases_out[5].state = NodeState::Done;
                 phases_out[5].end_ms = bev.ts_ms;
                 phases_out[5].detail = next.label;
             }
             push_replay_tail(bev.ts_ms, "P", TailKind::Stage, next.label);
+        }
+    }
+
+    if (!rd.trace_phases.empty()) {
+        for (const auto& tp : rd.trace_phases) {
+            if (tp.ts_ms > sim_ms) break;
+            if (tp.idx < 0 || tp.idx >= 6) continue;
+            if (tp.state == 0) phases_out[tp.idx].state = NodeState::Pending;
+            else if (tp.state == 1) phases_out[tp.idx].state = NodeState::Running;
+            else phases_out[tp.idx].state = NodeState::Done;
+            phases_out[tp.idx].start_ms = tp.start_ms;
+            phases_out[tp.idx].end_ms = tp.end_ms;
+            if (!tp.detail.empty()) phases_out[tp.idx].detail = tp.detail;
         }
     }
 

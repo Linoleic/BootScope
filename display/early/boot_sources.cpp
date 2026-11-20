@@ -129,7 +129,7 @@ static bool is_major_init_action(const std::string& action) {
     return false;
 }
 
-static bool is_resident_daemon(const std::string& svc) {
+bool is_resident_daemon(const std::string& svc) {
     if (svc.rfind("vendor.", 0) == 0 || svc.rfind("android.hardware.", 0) == 0) return true;
     static const char* const kDaemons[] = {
         "ueventd", "logd", "servicemanager", "hwservicemanager", "vndservicemanager",
