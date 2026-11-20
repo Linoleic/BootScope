@@ -179,7 +179,8 @@ def build_webui(root: Path, skip: bool = False) -> Path:
     webui_dir = root / 'webui'
     npm = 'npm.cmd' if os.name == 'nt' else 'npm'
     if not (webui_dir / 'node_modules').is_dir():
-        subprocess.run([npm, 'install'], cwd=str(webui_dir), check=True)
+        install_cmd = 'ci' if (webui_dir / 'package-lock.json').is_file() else 'install'
+        subprocess.run([npm, install_cmd], cwd=str(webui_dir), check=True)
     subprocess.run([npm, 'run', 'build'], cwd=str(webui_dir), check=True)
     if not (webroot / 'index.html').is_file():
         raise FileNotFoundError(f'Expected WebUI build output missing at {webroot / "index.html"}')
