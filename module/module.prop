@@ -1,6 +1,6 @@
 id=bootscope
 name=BootScope
-version=0.4.0
-versionCode=4
+version=0.5.0
+versionCode=5
 author=BootScope
-description=Boot state collector and early-boot startup display overlay.
+description=Unified C++ boot probe, early-boot display overlay, and KernelSU WebUI.

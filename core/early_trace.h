@@ -1,7 +1,7 @@
 #pragma once
 
-#include "early/bootloader.h"
-#include "early/sys_metrics.h"
+#include "bootloader.h"
+#include "sys_metrics.h"
 
 #include <stdint.h>
 #include <string>

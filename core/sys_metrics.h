@@ -1,6 +1,6 @@
 #pragma once
 
-#include "early/rules.h"
+#include "rules.h"
 
 #include <stdint.h>
 #include <string>

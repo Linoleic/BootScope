@@ -1,7 +1,7 @@
 #pragma once
 
-#include "early/bootloader.h"
-#include "early/rules.h"
+#include "bootloader.h"
+#include "rules.h"
 
 #include <stdint.h>
 #include <sys/types.h>

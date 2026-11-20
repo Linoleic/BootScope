@@ -1,6 +1,6 @@
-#include "early/boot_sources.h"
-#include "early/common.h"
-#include "early/early_trace.h"
+#include "boot_sources.h"
+#include "common.h"
+#include "early_trace.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -226,7 +226,7 @@ bool is_resident_daemon(const std::string& svc) {
     if (svc.rfind("vendor.", 0) == 0 || svc.rfind("android.hardware.", 0) == 0) return true;
     static const char* const kDaemons[] = {
         "ueventd", "logd", "servicemanager", "hwservicemanager", "vndservicemanager",
-        "vold", "netd", "surfaceflinger", "bootanim", "bootscope_early",
+        "vold", "netd", "surfaceflinger", "bootanim", "bootscope_early", "bootscope",
         "zygote", "zygote64", "webview_zygote", "adbd", "lmkd", "tombstoned",
         "traced", "traced_probes", "statsd", "keystore2", "credstore",
         "incidentd", "storaged", "audioserver", "cameraserver", "mediaserver",

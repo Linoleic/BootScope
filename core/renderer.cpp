@@ -1,12 +1,14 @@
-#include "early/boot_sources.h"
-#include "early/bootloader.h"
-#include "early/canvas.h"
-#include "early/common.h"
-#include "early/early_trace.h"
-#include "early/replay_source.h"
-#include "early/rules.h"
-#include "early/sf_gui.h"
-#include "early/sys_metrics.h"
+#include "renderer.h"
+
+#include "boot_sources.h"
+#include "bootloader.h"
+#include "canvas.h"
+#include "common.h"
+#include "early_trace.h"
+#include "replay_source.h"
+#include "rules.h"
+#include "sf_gui.h"
+#include "sys_metrics.h"
 
 #include <fcntl.h>
 #include <math.h>
@@ -32,7 +34,8 @@ void write_pid_file() {
     }
 }
 
-bool reexec_from_tmp_if_needed(int argc, char** argv) {
+bool reexec_from_tmp_if_needed(const DisplayOptions& opts, int argc, char** argv) {
+    if (opts.in_tmp) return false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--in-tmp") == 0) return false;
     }
@@ -70,7 +73,11 @@ bool reexec_from_tmp_if_needed(int argc, char** argv) {
 
     std::vector<char*> next_argv;
     next_argv.push_back((char*)kTmpExecPath);
-    for (int i = 1; i < argc; i++) next_argv.push_back(argv[i]);
+    next_argv.push_back((char*)"early");
+    for (int i = 1; i < argc; i++) {
+        if (i == 1 && strcmp(argv[i], "early") == 0) continue;
+        next_argv.push_back(argv[i]);
+    }
     next_argv.push_back((char*)"--in-tmp");
     next_argv.push_back(nullptr);
     execv(kTmpExecPath, next_argv.data());
@@ -391,37 +398,20 @@ void draw_dashboard(uint32_t* px, int stride, const RenderContext& ctx) {
 }
 
 }  // namespace
-}  // namespace bootscope
 
-int main(int argc, char** argv) {
-    using namespace bootscope;
+int run_display(const DisplayOptions& opts, int argc, char** argv) {
+    bool preview = (opts.mode != DisplayMode::Early);
+    bool replay_mode = (opts.mode == DisplayMode::Replay);
+    bool replay_bl = opts.replay_bl;
+    bool replay_pre_sf = opts.replay_pre_sf;
+    float replay_speed = opts.replay_speed;
+    if (replay_speed < 0.25f || replay_speed > 10.0f) replay_speed = 1.0f;
 
-    bool preview = false;
-    bool replay_mode = false;
-    bool replay_bl = false;
-    bool replay_pre_sf = false;
-    std::string replay_dir;
-    float replay_speed = 1.0f;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--preview") == 0) preview = true;
-        else if (strcmp(argv[i], "--replay") == 0 && i + 1 < argc) {
-            replay_mode = true;
-            preview = true;
-            replay_dir = argv[++i];
-        } else if (strcmp(argv[i], "--bl") == 0) {
-            replay_bl = true;
-        } else if (strcmp(argv[i], "--pre-sf") == 0) {
-            replay_pre_sf = true;
-        } else if (strcmp(argv[i], "--speed") == 0 && i + 1 < argc) {
-            float sp = (float)atof(argv[++i]);
-            if (sp >= 0.25f && sp <= 10.0f) replay_speed = sp;
-        }
-    }
-    if (!preview && access(kDisableMarker, F_OK) == 0) {
+    if (!preview && is_display_disabled()) {
         return 0;
     }
     if (!preview) {
-        reexec_from_tmp_if_needed(argc, argv);
+        reexec_from_tmp_if_needed(opts, argc, argv);
     }
 
     FILE* logf = preview ? stdout : fopen(kLogPath, "w");
@@ -448,7 +438,8 @@ int main(int argc, char** argv) {
 
     ReplayData replay_data;
     if (replay_mode) {
-        if (!load_replay_data(replay_dir, &replay_data)) {
+        std::string resolved = resolve_run_dir(opts.replay_dir);
+        if (resolved.empty() || !load_replay_data(resolved, &replay_data)) {
             fprintf(logf, "exit=replay_load_failed\n");
             return 1;
         }
@@ -534,10 +525,8 @@ int main(int argc, char** argv) {
             trace_life(boottime_ms(), "exit", "boot_already_completed");
             stop_threads();
             trace_close();
-            if (!preview) {
-                unlink(kPidPath);
-                unlink(kTmpExecPath);
-            }
+            unlink(kPidPath);
+            unlink(kTmpExecPath);
             return 0;
         }
         if (!preview && !replay_mode) {
@@ -1048,3 +1037,5 @@ int main(int argc, char** argv) {
     }
     return 0;
 }
+
+}  // namespace bootscope

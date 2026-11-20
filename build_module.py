@@ -1,16 +1,13 @@
-"""Build and package the unified BootScope KernelSU module."""
+"""Build and package the unified BootScope KernelSU module (native C++ core + Preact WebUI)."""
 import argparse
 import os
 from pathlib import Path
 import re
 import subprocess
-import tempfile
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from package_utils import read_module_version, write_text_file, write_zip_entry
 
-PREFERRED_PLATFORM = 'android-36'
-PREFERRED_BUILD_TOOLS = '36.0.0'
 MIN_PLATFORM_API = 33
 
 
@@ -28,54 +25,6 @@ def resolve_sdk_path(explicit: Path | None) -> Path:
     if os.name == 'nt':
         return Path(os.environ.get('LOCALAPPDATA', '.')) / 'Android' / 'Sdk'
     return Path.home() / 'Android' / 'Sdk'
-
-
-def resolve_android_jar(sdk: Path, platform: str | None) -> Path:
-    """Pick requested or preferred android.jar (API >= 33)."""
-    platforms_dir = sdk / 'platforms'
-    if platform:
-        candidate = platforms_dir / platform / 'android.jar'
-        if not candidate.is_file():
-            raise FileNotFoundError(f'Missing android.jar at {candidate}')
-        return candidate
-    preferred = platforms_dir / PREFERRED_PLATFORM / 'android.jar'
-    if preferred.is_file():
-        return preferred
-    candidates = []
-    if platforms_dir.is_dir():
-        for entry in platforms_dir.iterdir():
-            jar = entry / 'android.jar'
-            match = re.fullmatch(r'android-(\d+)(?:\.\d+)?', entry.name)
-            if jar.is_file() and match and int(match.group(1)) >= MIN_PLATFORM_API:
-                candidates.append((_version_key(entry.name), jar))
-    if not candidates:
-        raise FileNotFoundError(
-            f'No Android SDK platform >= {MIN_PLATFORM_API} found under {platforms_dir}'
-        )
-    return max(candidates, key=lambda item: item[0])[1]
-
-
-def resolve_d8(sdk: Path, build_tools: str | None) -> Path:
-    """Pick requested, preferred, or latest installed d8 executable."""
-    exe = 'd8.bat' if os.name == 'nt' else 'd8'
-    bt_dir = sdk / 'build-tools'
-    if build_tools:
-        candidate = bt_dir / build_tools / exe
-        if not candidate.is_file():
-            raise FileNotFoundError(f'Missing d8 at {candidate}')
-        return candidate
-    preferred = bt_dir / PREFERRED_BUILD_TOOLS / exe
-    if preferred.is_file():
-        return preferred
-    candidates = []
-    if bt_dir.is_dir():
-        for entry in bt_dir.iterdir():
-            candidate = entry / exe
-            if candidate.is_file():
-                candidates.append((_version_key(entry.name), candidate))
-    if not candidates:
-        raise FileNotFoundError(f'No d8 found under {bt_dir}')
-    return max(candidates, key=lambda item: item[0])[1]
 
 
 def resolve_ndk(sdk: Path, explicit: Path | None) -> Path:
@@ -113,40 +62,20 @@ def resolve_ndk_clang(ndk: Path) -> tuple[Path, Path]:
     raise FileNotFoundError(f'Missing {clang_name} under {prebuilt}')
 
 
-def build_display_dex(root: Path, sdk: Path, platform: str | None, build_tools: str | None) -> Path:
-    """Compile display/*.java into dist/bootscope-display/classes.dex."""
-    android_jar = resolve_android_jar(sdk, platform)
-    d8 = resolve_d8(sdk, build_tools)
-    output = root / 'dist' / 'bootscope-display'
-    output.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as temp:
-        sources = sorted((root / 'display').glob('*.java'))
-        subprocess.run(
-            ['javac', '--release', '8', '-Xlint:-options', '-classpath', str(android_jar),
-             '-d', temp, *map(str, sources)],
-            check=True,
-        )
-        classes = sorted((Path(temp) / 'bootscope').glob('*.class'))
-        subprocess.run(
-            [str(d8), '--min-api', str(MIN_PLATFORM_API), '--lib', str(android_jar),
-             '--output', str(output), *map(str, classes)],
-            check=True,
-        )
-    return output / 'classes.dex'
-
-
-def build_early_native(root: Path, sdk: Path, explicit_ndk: Path | None) -> Path:
-    """Compile display/bootscope_early.cpp and display/early/*.cpp into dist/bootscope-display/bootscope_early."""
+def build_native_core(root: Path, sdk: Path, explicit_ndk: Path | None) -> Path:
+    """Compile core/*.cpp into dist/bootscope-bin/bootscope."""
     ndk = resolve_ndk(sdk, explicit_ndk)
     clang, strip = resolve_ndk_clang(ndk)
-    output = root / 'dist' / 'bootscope-display'
+    output = root / 'dist' / 'bootscope-bin'
     output.mkdir(parents=True, exist_ok=True)
-    binary = output / 'bootscope_early'
-    display_dir = root / 'display'
-    sources = [display_dir / 'bootscope_early.cpp'] + sorted((display_dir / 'early').glob('*.cpp'))
+    binary = output / 'bootscope'
+    core_dir = root / 'core'
+    sources = sorted(core_dir.glob('*.cpp'))
+    if not sources:
+        raise FileNotFoundError(f'No C++ sources found under {core_dir}')
     subprocess.run(
-        [str(clang), '-O2', '-Wall', '-Wextra', '-static-libstdc++',
-         f'-I{display_dir}', '-lnativewindow', '-ldl', '-lm', '-o', str(binary),
+        [str(clang), '-std=c++17', '-O2', '-Wall', '-Wextra', '-static-libstdc++',
+         f'-I{core_dir}', '-lnativewindow', '-ldl', '-lm', '-o', str(binary),
          *[str(s) for s in sources]],
         check=True,
     )
@@ -155,34 +84,40 @@ def build_early_native(root: Path, sdk: Path, explicit_ndk: Path | None) -> Path
     return binary
 
 
+def build_webui(root: Path, skip: bool = False) -> Path:
+    """Build Vite + TypeScript + Preact WebUI into dist/webroot/."""
+    webroot = root / 'dist' / 'webroot'
+    if skip and (webroot / 'index.html').is_file():
+        return webroot
+    webui_dir = root / 'webui'
+    npm = 'npm.cmd' if os.name == 'nt' else 'npm'
+    if not (webui_dir / 'node_modules').is_dir():
+        subprocess.run([npm, 'install'], cwd=str(webui_dir), check=True)
+    subprocess.run([npm, 'run', 'build'], cwd=str(webui_dir), check=True)
+    if not (webroot / 'index.html').is_file():
+        raise FileNotFoundError(f'Expected WebUI build output missing at {webroot / "index.html"}')
+    return webroot
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--no-display', action='store_true',
-                        help='Package shell probe only without compiling display components')
-    parser.add_argument('--no-early', action='store_true',
-                        help='Skip compiling the native early-boot display binary')
     parser.add_argument('--sdk', type=Path, help='Android SDK root directory')
     parser.add_argument('--ndk', type=Path, help='Android NDK root directory')
-    parser.add_argument('--platform', help=f'Platform folder (default: {PREFERRED_PLATFORM} or latest)')
-    parser.add_argument('--build-tools', help=f'Build-tools version (default: {PREFERRED_BUILD_TOOLS} or latest)')
+    parser.add_argument('--skip-webui', action='store_true',
+                        help='Reuse existing dist/webroot build instead of running npm')
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
     module_dir = root / 'module'
     version = read_module_version(module_dir / 'module.prop')
 
-    dex_path = None
-    early_path = None
-    if not args.no_display:
-        sdk = resolve_sdk_path(args.sdk)
-        dex_path = build_display_dex(root, sdk, args.platform, args.build_tools)
-        print(dex_path)
-        if not args.no_early:
-            early_path = build_early_native(root, sdk, args.ndk)
-            print(early_path)
+    sdk = resolve_sdk_path(args.sdk)
+    native_bin = build_native_core(root, sdk, args.ndk)
+    print(native_bin)
+    webroot_dir = build_webui(root, skip=args.skip_webui)
+    print(webroot_dir)
 
-    suffix = '-headless' if args.no_display else ''
-    output = root / 'dist' / f'bootscope-{version}{suffix}.zip'
+    output = root / 'dist' / f'bootscope-{version}.zip'
     output.parent.mkdir(parents=True, exist_ok=True)
 
     text_entries = [
@@ -190,29 +125,21 @@ def main() -> None:
         ('action.sh', 0o100755),
         ('service.sh', 0o100755),
         ('probe.sh', 0o100755),
+        ('display.sh', 0o100755),
+        ('customize.sh', 0o100755),
+        ('uninstall.sh', 0o100755),
+        ('rules.conf', 0o100644),
+        ('initrc/bootscope.rc', 0o100644),
     ]
-    if not args.no_display:
-        text_entries.extend([
-            ('display.sh', 0o100755),
-            ('rules.conf', 0o100644),
-            ('webroot/index.html', 0o100644),
-            ('webroot/style.css', 0o100644),
-            ('webroot/app.js', 0o100644),
-        ])
-        if early_path is not None:
-            text_entries.extend([
-                ('customize.sh', 0o100755),
-                ('uninstall.sh', 0o100755),
-                ('initrc/bootscope.rc', 0o100644),
-            ])
 
     with ZipFile(output, 'w', ZIP_DEFLATED) as archive:
         for rel_path, mode in text_entries:
             write_text_file(archive, rel_path, module_dir / rel_path, mode)
-        if dex_path is not None:
-            write_zip_entry(archive, 'classes.dex', dex_path.read_bytes(), 0o100444)
-        if early_path is not None:
-            write_zip_entry(archive, 'bootscope_early', early_path.read_bytes(), 0o100755)
+        write_zip_entry(archive, 'bootscope', native_bin.read_bytes(), 0o100755)
+        for path in sorted(webroot_dir.rglob('*')):
+            if path.is_file():
+                rel = path.relative_to(webroot_dir).as_posix()
+                write_zip_entry(archive, f'webroot/{rel}', path.read_bytes(), 0o100644)
     print(output)
 
 

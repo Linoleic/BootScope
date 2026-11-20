@@ -1,4 +1,4 @@
-service bootscope_early /metadata/vold/ksu/bootscope_early
+service bootscope_early /metadata/vold/ksu/bootscope early
     user root
     group root
     seclabel u:r:ksu:s0

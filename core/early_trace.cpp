@@ -1,7 +1,8 @@
-#include "early/early_trace.h"
-#include "early/common.h"
+#include "early_trace.h"
+#include "common.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <mutex>
 #include <unordered_map>
 

@@ -1,9 +1,9 @@
 #pragma once
 
-#include "early/boot_sources.h"
-#include "early/bootloader.h"
-#include "early/rules.h"
-#include "early/sys_metrics.h"
+#include "boot_sources.h"
+#include "bootloader.h"
+#include "rules.h"
+#include "sys_metrics.h"
 
 #include <stdint.h>
 #include <string>

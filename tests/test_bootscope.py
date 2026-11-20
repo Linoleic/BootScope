@@ -375,77 +375,45 @@ class PackagingAndModuleTests(unittest.TestCase):
                 self.assertEqual(info.external_attr >> 16, 0o100755)
                 self.assertEqual(archive.read('service.sh'), b'#!/system/bin/sh\necho ok\n')
 
-    def test_build_module_sdk_resolution(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            sdk = Path(tmp)
-            for api in ('android-30', 'android-35', 'android-37.0'):
-                jar = sdk / 'platforms' / api / 'android.jar'
-                jar.parent.mkdir(parents=True)
-                jar.write_bytes(b'')
-            for ver in ('34.0.0', '36.1.0'):
-                exe_name = 'd8.bat' if build_module.os.name == 'nt' else 'd8'
-                d8 = sdk / 'build-tools' / ver / exe_name
-                d8.parent.mkdir(parents=True)
-                d8.write_bytes(b'')
-
-            self.assertEqual(
-                build_module.resolve_android_jar(sdk, None).parent.name,
-                'android-37.0',
-            )
-            self.assertEqual(
-                build_module.resolve_d8(sdk, None).parent.name,
-                '36.1.0',
-            )
-
     def test_bootfont_glyph_table_consistency(self):
-        for rel in ('display/BootFont.java', 'display/early/canvas.cpp'):
-            src = (ROOT / rel).read_text(encoding='utf-8')
-            chars_match = re.search(r'(?:CHARACTERS|kFontChars)\s*=\s*"([^"]+)"', src)
-            self.assertIsNotNone(chars_match, rel)
-            characters = chars_match.group(1)
-            glyphs_block = re.search(r'(?:GLYPHS|kFontGlyphs\[\])\s*=\s*\{(.*?)\};', src, re.DOTALL)
-            self.assertIsNotNone(glyphs_block, rel)
-            glyphs = re.findall(r'"([0-9A-F]{14})"', glyphs_block.group(1))
-            self.assertEqual(len(characters), len(glyphs), rel)
-            self.assertIn('?', characters, rel)
+        src = (ROOT / 'core' / 'canvas.cpp').read_text(encoding='utf-8')
+        chars_match = re.search(r'kFontChars\s*=\s*"([^"]+)"', src)
+        self.assertIsNotNone(chars_match)
+        characters = chars_match.group(1)
+        glyphs_block = re.search(r'kFontGlyphs\[\]\s*=\s*\{(.*?)\};', src, re.DOTALL)
+        self.assertIsNotNone(glyphs_block)
+        glyphs = re.findall(r'"([0-9A-F]{14})"', glyphs_block.group(1))
+        self.assertEqual(len(characters), len(glyphs))
+        self.assertIn('?', characters)
 
-    def test_display_scrolling_event_tail_parity(self):
-        early_files = [ROOT / 'display' / 'bootscope_early.cpp']
-        early_files += sorted((ROOT / 'display' / 'early').glob('*.h'))
-        early_files += sorted((ROOT / 'display' / 'early').glob('*.cpp'))
-        early_cpp = '\n'.join(p.read_text(encoding='utf-8') for p in early_files)
-        java_probe = (ROOT / 'display' / 'DisplayProbe.java').read_text(encoding='utf-8')
+    def test_native_core_and_webui_structure(self):
+        core_files = sorted((ROOT / 'core').glob('*.h')) + sorted((ROOT / 'core').glob('*.cpp'))
+        core_cpp = '\n'.join(p.read_text(encoding='utf-8') for p in core_files)
         rules_conf = (ROOT / 'module' / 'rules.conf').read_text(encoding='utf-8')
-        for src in (early_cpp, java_probe):
-            self.assertIn('760', src)
-            self.assertIn('CRITICAL PATH', src)
-            self.assertIn('EVENTS', src)
-            self.assertIn('M=MOD', src)
-            self.assertIn('*:E', src)
-            self.assertIn('android_id', src)
-            self.assertIn('bootscope_rules.conf', src)
-        self.assertIn('920', early_cpp)
-        self.assertIn('1280', early_cpp)
-        self.assertIn('680', early_cpp)
-        self.assertIn('read_disk_io', early_cpp)
-        self.assertIn('read_top_cpu', early_cpp)
-        self.assertIn('read_mem_zram', early_cpp)
-        self.assertIn('read_cpu_freq_line', early_cpp)
-        self.assertIn('632', java_probe)
-        self.assertIn('ModuleError', early_cpp)
-        self.assertIn('MODULE_ERROR', java_probe)
-        self.assertIn('RKNS_3gui13LayerMetadataEPj', early_cpp)
-        self.assertIn('ENS_3gui13LayerMetadataEPj', early_cpp)
-        self.assertIn('getPhysicalDisplayTokenENS_17PhysicalDisplayIdE', early_cpp)
-        self.assertIn('getPhysicalDisplayTokenEm', early_cpp)
-        self.assertIn('Bootloader start count', early_cpp)
-        self.assertIn('Bootloader start count', java_probe)
-        self.assertIn('/dev/kmsg', early_cpp)
-        self.assertIn('is_stack_trace_noise', early_cpp)
-        self.assertIn('isStackTraceNoise', java_probe)
+        for marker in (
+            'CRITICAL PATH', 'EVENTS', 'M=MOD', '*:E', 'android_id', 'bootscope_rules.conf',
+            '1280', '680', '760', '920', 'read_disk_io', 'read_top_cpu', 'read_mem_zram',
+            'read_cpu_freq_line', 'RKNS_3gui13LayerMetadataEPj', 'ENS_3gui13LayerMetadataEPj',
+            'getPhysicalDisplayTokenENS_17PhysicalDisplayIdE', 'getPhysicalDisplayTokenEm',
+            'Bootloader start count', 'parse_qcom_uefilog_file', 'parse_boottime_props',
+            'parse_mtk_bootprof_file', '__system_property_foreach', 'cmd_list_json',
+            'cmd_inspect_json', 'cmd_compare_json', 'cmd_rules_set_json',
+            'BOOTSCOPE / BOOTLOADER', 'ro.surface_flinger.primary_display_orientation', 'rot_quad',
+        ):
+            self.assertIn(marker, core_cpp)
+        self.assertFalse((ROOT / 'display').exists())
         self.assertIn('ignore_cmd=', rules_conf)
         self.assertIn('module_key=bootscope', rules_conf)
         self.assertIn('redact_key=android_id', rules_conf)
+
+        web_pkg = (ROOT / 'webui' / 'package.json').read_text(encoding='utf-8')
+        web_bridge = (ROOT / 'webui' / 'src' / 'bridge.ts').read_text(encoding='utf-8')
+        self.assertIn('"preact"', web_pkg)
+        self.assertIn('"vite"', web_pkg)
+        self.assertIn('window.ksu', web_bridge)
+        self.assertIn('list-json', web_bridge)
+        self.assertIn('inspect-json', web_bridge)
+        self.assertIn('compare-json', web_bridge)
 
     def test_build_module_ndk_resolution(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -465,76 +433,56 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('probe.sh', service_sh)
         self.assertIn('display.sh', service_sh)
         self.assertIn('disable_display', service_sh)
+        self.assertIn('/metadata/vold/ksu', service_sh)
         self.assertIn('bootscope_rules.conf', service_sh)
-        self.assertIn('&', service_sh)
         self.assertNotIn('app_process', service_sh)
 
         customize_sh = (ROOT / 'module' / 'customize.sh').read_text(encoding='utf-8')
-        self.assertIn('bootscope_early', customize_sh)
+        self.assertIn('bootscope', customize_sh)
         self.assertIn('bootscope_rules.conf', customize_sh)
         self.assertIn('KSU', customize_sh)
         self.assertIn('arm64-v8a', customize_sh)
         self.assertNotRegex(customize_sh, r'(?m)^\s*exit\b')
 
         uninstall_sh = (ROOT / 'module' / 'uninstall.sh').read_text(encoding='utf-8')
+        self.assertIn('/metadata/vold/ksu/bootscope', uninstall_sh)
         self.assertIn('bootscope_rules.conf', uninstall_sh)
 
         rc = (ROOT / 'module' / 'initrc' / 'bootscope.rc').read_text(encoding='utf-8')
-        self.assertIn('service bootscope_early /metadata/vold/ksu/bootscope_early', rc)
+        self.assertIn('service bootscope_early /metadata/vold/ksu/bootscope early', rc)
         self.assertIn('on late-fs', rc)
 
         probe_sh = (ROOT / 'module' / 'probe.sh').read_text(encoding='utf-8')
         display_sh = (ROOT / 'module' / 'display.sh').read_text(encoding='utf-8')
-        self.assertIn('BASE=/data/adb/bootscope', probe_sh)
-        self.assertIn('BASE=/data/adb/bootscope', display_sh)
-        self.assertIn('.probe.lock', probe_sh)
-        self.assertIn('init-events.tsv', probe_sh)
-        self.assertIn('psi.tsv', probe_sh)
-        self.assertIn('proc.tsv', probe_sh)
-        self.assertIn('bootloader-kpi.tsv', probe_sh)
-        self.assertIn('ro\\.boot\\.boottime', probe_sh)
-        self.assertIn('dmesg', probe_sh)
+        action_sh = (ROOT / 'module' / 'action.sh').read_text(encoding='utf-8')
+        self.assertIn('bootscope" collect', probe_sh)
         self.assertIn('.display.lock', display_sh)
         self.assertIn('early_native', display_sh)
-        self.assertIn('first_frame_submitted_ms=', display_sh)
-        self.assertIn('unsupported_sdk', display_sh)
+        self.assertIn('late_native', display_sh)
+        self.assertIn('replay latest --bl --pre-sf', action_sh)
+        self.assertIn('summary latest', action_sh)
 
-        sf_gui_cpp = (ROOT / 'display' / 'early' / 'sf_gui.cpp').read_text(encoding='utf-8')
-        self.assertIn('ro.surface_flinger.primary_display_orientation', sf_gui_cpp)
-        self.assertIn('rot_quad', sf_gui_cpp)
-
-    def test_build_module_headless_zip(self):
-        subprocess.run([sys.executable, str(ROOT / 'build_module.py'), '--no-display'], check=True)
+    def test_build_module_zip_layout(self):
+        cmd = [sys.executable, str(ROOT / 'build_module.py')]
+        if (ROOT / 'dist' / 'webroot' / 'index.html').is_file():
+            cmd.append('--skip-webui')
+        subprocess.run(cmd, check=True)
         version = package_utils.read_module_version(ROOT / 'module' / 'module.prop')
-        archive_path = ROOT / 'dist' / f'bootscope-{version}-headless.zip'
+        archive_path = ROOT / 'dist' / f'bootscope-{version}.zip'
         self.assertTrue(archive_path.is_file())
         with ZipFile(archive_path, 'r') as archive:
-            self.assertEqual(sorted(archive.namelist()), ['action.sh', 'module.prop', 'probe.sh', 'service.sh'])
-            for name in ('action.sh', 'probe.sh', 'service.sh'):
-                self.assertEqual(archive.getinfo(name).external_attr >> 16, 0o100755)
-                self.assertNotIn(b'\r\n', archive.read(name))
-
-    def test_bl_replay_and_webroot_assets(self):
-        bootloader_cpp = (ROOT / 'display' / 'early' / 'bootloader.cpp').read_text(encoding='utf-8')
-        early_main_cpp = (ROOT / 'display' / 'bootscope_early.cpp').read_text(encoding='utf-8')
-        action_sh = (ROOT / 'module' / 'action.sh').read_text(encoding='utf-8')
-        build_py = (ROOT / 'build_module.py').read_text(encoding='utf-8')
-        web_html = (ROOT / 'module' / 'webroot' / 'index.html').read_text(encoding='utf-8')
-        web_js = (ROOT / 'module' / 'webroot' / 'app.js').read_text(encoding='utf-8')
-        web_css = (ROOT / 'module' / 'webroot' / 'style.css').read_text(encoding='utf-8')
-
-        self.assertIn('parse_qcom_uefilog_file', bootloader_cpp)
-        self.assertIn('parse_boottime_props', bootloader_cpp)
-        self.assertIn('parse_mtk_bootprof_file', bootloader_cpp)
-        self.assertIn('--bl', early_main_cpp)
-        self.assertIn('BOOTSCOPE / BOOTLOADER', early_main_cpp)
-        self.assertIn('--bl', action_sh)
-        self.assertIn('webroot/index.html', build_py)
-        self.assertIn('webroot/app.js', build_py)
-        self.assertIn('webroot/style.css', build_py)
-        self.assertIn('Bootloader', web_html)
-        self.assertIn('window.ksu', web_js)
-        self.assertIn('--window-inset-top', web_css)
+            names = set(archive.namelist())
+            for req in (
+                'module.prop', 'action.sh', 'service.sh', 'probe.sh', 'display.sh',
+                'customize.sh', 'uninstall.sh', 'rules.conf', 'initrc/bootscope.rc',
+                'bootscope', 'webroot/index.html',
+            ):
+                self.assertIn(req, names)
+            self.assertNotIn('classes.dex', names)
+            self.assertEqual(archive.getinfo('bootscope').external_attr >> 16, 0o100755)
+            for sh in ('action.sh', 'service.sh', 'probe.sh', 'display.sh'):
+                self.assertEqual(archive.getinfo(sh).external_attr >> 16, 0o100755)
+                self.assertNotIn(b'\r\n', archive.read(sh))
 
 
 if __name__ == '__main__':

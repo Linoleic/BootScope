@@ -1,5 +1,5 @@
-#include "early/bootloader.h"
-#include "early/common.h"
+#include "bootloader.h"
+#include "common.h"
 
 #include <ctype.h>
 #include <math.h>

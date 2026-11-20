@@ -1,6 +1,6 @@
-#include "early/sf_gui.h"
-#include "early/canvas.h"
-#include "early/common.h"
+#include "sf_gui.h"
+#include "canvas.h"
+#include "common.h"
 
 #include <dlfcn.h>
 #include <math.h>

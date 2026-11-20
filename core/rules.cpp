@@ -1,6 +1,6 @@
-#include "early/rules.h"
-#include "early/canvas.h"
-#include "early/common.h"
+#include "rules.h"
+#include "canvas.h"
+#include "common.h"
 
 #include <ctype.h>
 #include <stdio.h>

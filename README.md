@@ -1,85 +1,33 @@
 # BootScope
 
-BootScope 是 Android 启动状态可视化及分析项目。当前包含统一打包的 KernelSU 模块（数据采集探针 + 实验性开机显示面板）以及电脑端的快照监控与启动回放工具。
+BootScope 是 Android 启动状态可视化及分析项目（目标平台：现代 `arm64-v8a` KernelSU 设备，并在脚本中为其他 root 框架保留接入钩子）。项目采用**单一 C++17 核心二进制 + TypeScript/Preact WebUI + PC Python 分析套件**架构。
 
-## KernelSU 模块（采集探针 + 开机显示）
+## 构建模块
 
-`module/` 与 `display/` 合并构建为单一 KernelSU 模块（`id=bootscope`）。
+需要 Android NDK、Node.js/npm 及 Python 3：
 
 ```powershell
 python .\build_module.py
 ```
 
-使用 JDK、Android SDK（API ≥ 33，优先 `android-36`）、Build Tools（优先 `36.0.0`）以及 Android NDK 编译 `display/bootscope_early.cpp` 与 `display/*.java`，生成完整模块 `dist/bootscope-0.4.0.zip`（同时包含早期原生面板与 Java 回退面板）。如果只需 Java 回退版（无需 NDK），可加 `--no-early`；如果只需纯 shell 数据采集，可运行：
+构建脚本会：
+1. 使用 NDK（C++17 + `-static-libstdc++`）编译 `core/*.cpp` 为单一可执行文件 `bootscope`。
+2. 在 `webui/` 运行 `tsc --noEmit && vite build` 生成静态资源到 `dist/webroot/`（可用 `--skip-webui` 复用现有产物）。
+3. 打包为 `dist/bootscope-0.5.0.zip`。
+
+## 架构概览
+
+1. **核心原生二进制 `bootscope`（`core/`）**：
+   - `bootscope early`：KernelSU `on late-fs`（`initrc/bootscope.rc`）拉起早期 SurfaceFlinger 浮层，捕获 `early-trace.tsv`（含框架/Init/BL/资源/PSI 快照）。`display.sh` 在缺失早期帧时可自动降级为 `late_native`。
+   - `bootscope collect`（[probe.sh](module/probe.sh) 调度）：零 `fork` 遍历 `__system_property_foreach`、`/proc/pressure/*`、`/proc/[pid]/stat`、`/dev/kmsg` 与多平台 Bootloader 数据（`ro.boot.boottime*`、`/dev/logfs/UefiLog0.txt`、`/proc/bootprof`、高通 `boot_stats` KPI），按 `max_history` 自动轮转清理旧目录。
+   - `bootscope replay <target> [--bl] [--pre-sf] [--speed <x>]`：屏幕叠加全链路回放（支持 POR 通电起的 BL 阶段与帧前 Init 阶段）。
+   - `bootscope list-json` / `inspect-json` / `compare-json` / `summary` / `prune` / `config-get` / `config-set` / `rules-get` / `rules-set`：统一后端 JSON/CLI 契约。
+2. **KernelSU WebUI（`webui/`）**：
+   - Vite + TypeScript + Preact 构建，通过 `window.ksu.exec` 直接消费 `bootscope` JSON API，提供全链路 SVG 甘特时间轴、BL 分段剖析、A/B 两次启动耗时对比、屏幕回放控制台，以及开关/历史清理/`rules.conf` 在线编辑。
+
+## PC 端分析与单元测试
 
 ```powershell
-python .\build_module.py --no-display
-```
-
-生成仅包含采集脚本的 `dist/bootscope-0.4.0-headless.zip`。若之前曾安装拆分的旧模块（`bootscope_probe` / `bootscope_display_probe`），升级前建议先卸载：
-
-```powershell
-adb -s <设备序列号> shell "su -c 'ksud module uninstall bootscope_probe; ksud module uninstall bootscope_display_probe'"
-```
-
-### 运行机制
-
-`module/service.sh` 非阻塞地分别拉起两个独立后台任务，彼此互不影响：
-
-1. **采集探针（`probe.sh`）**：每轮采样 init 服务状态、首次启动时间、`ro.boottime.init.*` 阶段耗时、`ro.boot.boottime*` / 高通 `boot_stats` `KPI:` Bootloader 指标（`bootloader-kpi.tsv`，如设备提供）、内核 PSI 压力（`psi.tsv`）、整机 CPU/内存及活跃进程 CPU ticks 快照（`/proc/stat` + `/proc/meminfo` + `/proc/[pid]/stat` 写入 `proc.tsv`）及开机动画和启动完成属性，最多 60 次；连续 3 次检测到 `sys.boot_completed=1` 后，限时读取当前 `events` 环形缓冲（仅保存允许的框架启动事件标签与毫秒数值）以及 `dmesg` 中的脱敏 `init:` 阶段/服务启停事件（`init-events.tsv`），补齐 `0s` 到 `service.sh` 拉起前的早期启动过程。快照记录观测时刻，事件字段使用各写入方定义的时钟。
-2. **开机显示（`bootscope_early` 原生早期探针 + `display.sh` 回退）**：
-   - **早期原生路径（KernelSU + `arm64-v8a` 默认）**：仅在 KernelSU 环境且 `ro.product.cpu.abi=arm64-v8a` 时，安装与启动脚本才将静态链接 C++ 运行库的原生二进制 `bootscope_early` 同步至 `/metadata/vold/ksu/bootscope_early`，并通过 KernelSU 的 `initrc/bootscope.rc` 在 `on late-fs`（约 2.3 秒）即刻拉起，无需等待 `/data` 解密、`derive_classpath` 或 ART 启动即可渲染到 SurfaceFlinger；面板采用居中扩展布局，自动跟踪分辨率、旋转方向与刷新率切换，实时展示设备基础硬件/系统信息（型号、Android/SDK 版本、ABI/核数/内存、内核版本、槽位与 Verified Boot 状态）、6 段关键路径进度树（`BL` / `INIT` / `ZYG` / `PRE` / `PMS` / `AMS` 耗时、当前阻塞子任务 `>WAIT` 及最大一次性任务）、内核 PSI 压力、核心服务状态，以及底部 8 行按外置规则过滤的高信噪比滚动事件尾行。
-   - **可配置事件规则（`rules.conf`）**：模块随包内置默认规则 `module/rules.conf`（配置 `ignore_cmd` / `ignore_svc` / `ignore_tag` / `module_key` / `redact_key`），用户可在 `/data/adb/bootscope/rules.conf` 创建自定义覆盖文件（升级模块不丢失）；安装与启动脚本会自动同步生效规则到 `/metadata/vold/ksu/bootscope_rules.conf` 供 2.3s 早期面板读取。
-   - **回退与多框架兼容**：在 Magisk / APatch、非 `arm64-v8a` 设备，或 `bootscope_early` 未能成功提交首帧时，`display.sh` 会自动保存失败诊断（如有）并回退到 `app_process`（`DisplayProbe.java`，需 Android 13 / API ≥ 33；低版本记录 `mode=unsupported_sdk` 后安全退出）。
-   - 如需仅关闭开机显示而保留数据采集，创建 `/data/adb/bootscope/disable_display`（或模块目录下的 `disable_display`）即可，重启后自动跳过显示探针。
-
-每次开机的输出统一保存在设备 `/data/adb/bootscope/<boot-id>/`（目录权限 0700，文件默认 0600），通过独立的 `.probe.lock` / `.display.lock` 防止同一开机周期重复运行：
-- 采集结果：`metadata.txt`、`samples.txt`、`boot-events.tsv`、`init-events.tsv`、`psi.tsv`、`proc.tsv`、`logcat-exit.txt`、`logcat-error.txt`、`dmesg-exit.txt`、`dmesg-error.txt`
-- 显示诊断：`display-status.txt`、`display-renderer.txt`、`display-compositor.txt`
-
-日志和属性可能包含敏感的系统信息；不会自动上传，也不会自动删除旧记录。在目标设备确认 `ksud module --help` 支持后，可使用 `ksud module disable bootscope` 禁用模块，重启后验证其不再运行。不要将不同 KernelSU 分支的恢复行为视为相同；安装和重启前确认设备的实际恢复方式。
-
-## 分析与回放
-
-使用电脑端工具分析样本或在 Windows Terminal 中按实际采样间隔回放（兼容旧版样本）：
-
-```powershell
-python .\analyze_probe.py .\results\pixel-probe-v02\samples.txt
-python .\analyze_probe.py .\results\bootA\samples.txt --compare .\results\bootB\samples.txt
-python .\analyze_probe.py .\results\bootA\samples.txt --html .\results\report.html
-python .\replay.py .\results\pixel-probe-v02\samples.txt --speed 2
-```
-
-回放按核心组件与观测窗口内发生状态变化的服务分组展示，框架事件在回放结束后列出并附相邻事件差值。启动事件选择参考 [AOSP perfboot](https://android.googlesource.com/platform/system/core/+/android16-release/init/perfboot.py)。
-
-## 实时 ADB 监控
-
-需要 Python 3 和 Android platform-tools。连接设备并确认 ADB 授权后：
-
-```powershell
-python .\bootscope.py -s <设备序列号>
-python .\bootscope.py -s <设备序列号> --watch
-python .\bootscope.py -s <设备序列号> --json
-```
-
-使用 `adb devices -l` 查看序列号。`--watch` 按秒轮询并输出观测到的变化；ADB 在重启中断后需要重新运行。此工具不会保存系统属性或日志到文件。
-
-## 数据含义与边界
-
-- `init.svc.<name>` 是 init 的服务进程状态；`running` 不代表内部初始化完成。
-- `ro.boottime.<name>` 是系统记录的服务首次启动时间，单位是从 `CLOCK_BOOTTIME` 起算的纳秒，不是耗时；未提供时显示未知。
-- `sys.boot_completed` 是系统属性，不代表用户桌面已经可交互。
-- 快照仅包含可读属性；轮询只能发现两次采样之间的净变化，无法可靠捕获短暂状态；时间为观察时间，不是事件发生的精确时间。
-- 状态名称的排列是字典序，不是依赖树；当前不推断依赖、等待原因或初始化耗时。
-
-## 单元测试
-
-```powershell
+python .\analyze_probe.py .\results\bootA\samples.txt --compare .\results\bootB\samples.txt --html .\results\report.html
 python -m unittest discover -s tests -v
 ```
-
-## 计划
-
-1. 补充安全脱敏的 `dmesg` (`init:` 事件) 与 `ro.boottime.init.*` 阶段耗时采集，将分析与回放覆盖至 `0s–24s` 全程启动。
-2. 加入来源标记和启动后报告，视设备能力研究 Bootchart 和 Perfetto。
-3. 逐步研究更准确的依赖、等待和耗时，需要时增加系统侧追踪支持。

@@ -1,5 +1,5 @@
-#include "early/canvas.h"
-#include "early/common.h"
+#include "canvas.h"
+#include "common.h"
 
 #include <ctype.h>
 #include <string.h>
