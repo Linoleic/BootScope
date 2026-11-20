@@ -79,6 +79,7 @@ bool reexec_from_tmp_if_needed(int argc, char** argv) {
 struct RenderContext {
     bool preview = false;
     bool replay = false;
+    bool replay_pre_sf_phase = false;
     int frame_idx = 0;
     int64_t now_ms = 0;
     double uptime_s = 0.0;
@@ -179,7 +180,7 @@ void draw_dashboard(uint32_t* px, int stride, const RenderContext& ctx) {
     fill_rect(px, stride, 0, 0, 8, bh, kColorAccent);
 
     const char* title = ctx.replay
-        ? "BOOTSCOPE / REPLAY"
+        ? (ctx.replay_pre_sf_phase ? "BOOTSCOPE / PRE-SF" : "BOOTSCOPE / REPLAY")
         : (ctx.preview ? "BOOTSCOPE / PREVIEW" : "BOOTSCOPE / BOOT");
     draw_text(px, stride, title, 24, 20, 3, kColorAccent);
 
@@ -888,6 +889,7 @@ int main(int argc, char** argv) {
         RenderContext ctx;
         ctx.preview = preview;
         ctx.replay = replay_mode;
+        ctx.replay_pre_sf_phase = replay_mode && replay_pre_sf && (now_ms < replay_data.start_ms);
         ctx.frame_idx = frame_idx;
         ctx.now_ms = now_ms;
         ctx.uptime_s = uptime_s;

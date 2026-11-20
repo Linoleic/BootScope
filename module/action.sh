@@ -28,7 +28,7 @@ esac
 [ -x "$MODDIR/bootscope_early" ] || MODDIR=/data/adb/modules/bootscope
 if [ -x "$MODDIR/bootscope_early" ] && [ "$1" != "--text-only" ]; then
     echo "Launching BootScope overlay replay..."
-    "$MODDIR/bootscope_early" --replay "$RUN_DIR" 2>&1
+    "$MODDIR/bootscope_early" --replay "$RUN_DIR" --pre-sf 2>&1
 fi
 
 if [ -f "$RUN_DIR/metadata.txt" ]; then
