@@ -85,6 +85,35 @@ export function CompareView({ runs, refreshSeq = 0 }: { runs: RunSummary[]; refr
             })}
           </section>
 
+          {data.bl_deltas.length > 0 && (
+            <section class="card">
+              <div class="card-head">
+                <h2>Bootloader 分段耗时差异 (B - A)</h2>
+                <span class="pill mono">{data.run_a.bl_source} → {data.run_b.bl_source}</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>阶段</th><th>A</th><th>B</th><th>Δ</th></tr>
+                  </thead>
+                  <tbody>
+                    {data.bl_deltas.map((r) => {
+                      const d = fmtDelta(r.delta_ms, r.has_delta);
+                      return (
+                        <tr key={`bl-${r.id}`}>
+                          <td class="mono">{r.id}</td>
+                          <td class="mono">{fmtMs(r.a_ms)}</td>
+                          <td class="mono">{fmtMs(r.b_ms)}</td>
+                          <td class={`mono ${d.cls}`}>{d.text}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
           <section class="card">
             <div class="card-head">
               <h2>关键路径与里程碑差异 (B - A)</h2>

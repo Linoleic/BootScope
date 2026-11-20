@@ -401,6 +401,7 @@ class PackagingAndModuleTests(unittest.TestCase):
             'BOOTSCOPE / BOOTLOADER', 'ro.surface_flinger.primary_display_orientation', 'rot_quad',
             'sanitize_trace_text', 'errors_total', 'getrusage', 'self_cpu_ms', 'self_rss_kb',
             'bootscope_early', 'cmd_logs_json', 'logs-json', 'log_counts', '--order', '"critical"',
+            'redact_sensitive_text', 'is_caused_by_line', 'trace_text',
         ):
             self.assertIn(marker, core_cpp)
         self.assertFalse((ROOT / 'display').exists())
@@ -450,6 +451,22 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('is-copied', web_css)
         self.assertIn('timeline-stage-divider', web_logs)
         self.assertIn('时间线', web_logs)
+        self.assertTrue((ROOT / 'webui' / 'src' / 'components' / 'PsiCpuCard.tsx').is_file())
+        self.assertTrue((ROOT / 'webui' / 'src' / 'components' / 'BootTrendCard.tsx').is_file())
+        web_psi = (ROOT / 'webui' / 'src' / 'components' / 'PsiCpuCard.tsx').read_text(encoding='utf-8')
+        json_api_cpp = (ROOT / 'core' / 'json_api.cpp').read_text(encoding='utf-8')
+        self.assertIn('PsiCpuCard', web_app)
+        self.assertIn('BootTrendCard', web_app)
+        self.assertIn('bl_deltas', web_compare)
+        self.assertIn('nearestChartIndex', web_format)
+        self.assertIn('buildMonotoneCubic', web_format)
+        self.assertIn('svgXFromPointer', web_format)
+        self.assertIn('buildMonotoneCubic', web_psi)
+        self.assertIn('psi-cpu-fill', web_psi)
+        self.assertNotIn('<polyline', web_psi)
+        self.assertIn('trace_metrics', json_api_cpp)
+        self.assertIn('chart-ruler', web_css)
+        self.assertIn('chart-samples', web_css)
 
     def test_build_module_ndk_resolution(self):
         with tempfile.TemporaryDirectory() as tmp:

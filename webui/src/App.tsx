@@ -7,9 +7,11 @@ import {
   launchReplay,
 } from './bridge';
 import { BlCard } from './components/BlCard';
+import { BootTrendCard } from './components/BootTrendCard';
 import { CompareView } from './components/CompareView';
 import { GanttTimeline } from './components/GanttTimeline';
 import { LogsView } from './components/LogsView';
+import { PsiCpuCard } from './components/PsiCpuCard';
 import { ReplayBar } from './components/ReplayBar';
 import { SettingsView } from './components/SettingsView';
 import { copyTextToClipboard, fmtMs } from './format';
@@ -253,6 +255,8 @@ export function App() {
 
               <GanttTimeline run={inspectData} />
               <BlCard bl={inspectData.bootloader} />
+              <PsiCpuCard psi={inspectData.psi_series} topCpu={inspectData.top_cpu} />
+              <BootTrendCard runs={listData.runs} selectedId={selectedId} onSelect={handleSelectRun} />
 
               <section class="two-col">
                 <article class="card">
