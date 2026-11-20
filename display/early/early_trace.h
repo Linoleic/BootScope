@@ -16,6 +16,7 @@ void trace_bl(int64_t ts_ms, const std::string& bl_line, int64_t total_ms);
 void trace_phase(
     int64_t ts_ms, int idx, int state, int64_t start_ms, int64_t end_ms,
     const std::string& detail);
+void trace_stage(int64_t ts_ms, int step, const std::string& label, const std::string& raw_ms);
 void trace_tail(int64_t ts_ms, const char* source, const char* kind, const std::string& text);
 void trace_kv(int64_t ts_ms, const std::string& key, const std::string& text, bool alert);
 void trace_metric(

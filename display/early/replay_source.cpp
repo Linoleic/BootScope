@@ -260,6 +260,13 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
                 tp.end_ms = strtoll(cols[5].c_str(), nullptr, 10);
                 tp.detail = cols[6];
                 out->trace_phases.push_back(std::move(tp));
+            } else if (rtype == "STAGE" && cols.size() >= 4) {
+                ReplayTraceStage ts_row;
+                ts_row.ts_ms = ts_ms;
+                ts_row.step = atoi(cols[2].c_str());
+                ts_row.label = cols[3];
+                ts_row.raw_ms = (cols.size() >= 5) ? cols[4] : "";
+                out->trace_stages.push_back(std::move(ts_row));
             } else if (rtype == "TAIL" && cols.size() >= 5) {
                 ReplayTraceTail tt;
                 tt.ts_ms = ts_ms;
@@ -305,6 +312,8 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
             }
         }
         fclose(f);
+        std::sort(out->trace_stages.begin(), out->trace_stages.end(),
+                  [](const ReplayTraceStage& a, const ReplayTraceStage& b) { return a.ts_ms < b.ts_ms; });
         std::sort(out->trace_phases.begin(), out->trace_phases.end(),
                   [](const ReplayTracePhase& a, const ReplayTracePhase& b) { return a.ts_ms < b.ts_ms; });
         std::sort(out->trace_kvs.begin(), out->trace_kvs.end(),
@@ -314,7 +323,7 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
         std::sort(out->trace_metrics.begin(), out->trace_metrics.end(),
                   [](const ReplayTraceMetric& a, const ReplayTraceMetric& b) { return a.ts_ms < b.ts_ms; });
         out->has_trace = !out->trace_tails.empty() || !out->trace_metrics.empty()
-            || !out->trace_phases.empty() || !out->trace_kvs.empty();
+            || !out->trace_phases.empty() || !out->trace_kvs.empty() || !out->trace_stages.empty();
     }
 
     for (const auto& bev : out->boot_events) {
@@ -351,6 +360,34 @@ static void apply_trace_kvs(const ReplayData& rd, int64_t sim_ms, SysMetrics* sy
         }
         if (!updated) {
             sys_out->rows.push_back({kv.key, kv.text, kv.alert});
+        }
+    }
+}
+
+static void sync_replay_stage(
+        const ReplayData& rd, int64_t sim_ms, const PhaseNode* phases,
+        const std::string* cur_states, StageInfo* stage_out) {
+    for (const auto& ts_row : rd.trace_stages) {
+        if (ts_row.ts_ms > sim_ms) break;
+        stage_out->step = ts_row.step;
+        stage_out->label = ts_row.label;
+        stage_out->raw_ms = ts_row.raw_ms;
+    }
+    if (stage_out->step == 0) {
+        if (phases[5].state == NodeState::Done) {
+            *stage_out = {10, "ANIM_DONE", ""};
+        } else if (phases[5].state == NodeState::Running) {
+            *stage_out = {9, "AMS_READY", ""};
+        } else if (phases[4].state == NodeState::Running) {
+            *stage_out = {8, "PMS_START", ""};
+        } else if (phases[3].state == NodeState::Running) {
+            *stage_out = {5, "PRELOAD", ""};
+        } else if (phases[2].state == NodeState::Running || cur_states[2] == "RUN") {
+            *stage_out = {3, "ZYGOTE_START", ""};
+        } else if (cur_states[3] == "RUN" || cur_states[3] == "STOP") {
+            *stage_out = {2, "APEX_POST_FS", ""};
+        } else {
+            *stage_out = {1, "EARLY_BOOTANIM", ""};
         }
     }
 }
@@ -543,6 +580,7 @@ void build_replay_snapshot(
             populate_resource_rows(sys_out, -1, -1, -1);
         }
         apply_trace_kvs(rd, sim_ms, sys_out);
+        sync_replay_stage(rd, sim_ms, phases_out, cur_states_out, stage_out);
         std::sort(tail_out->begin(), tail_out->end(), [](const TailEntry& a, const TailEntry& b) {
             if (a.ts_ms != b.ts_ms) return a.ts_ms < b.ts_ms;
             return a.seq < b.seq;
@@ -637,6 +675,7 @@ void build_replay_snapshot(
     }
     populate_resource_rows(sys_out, *cpu_pct_out, *io_pct_out, *mem_pct_out);
     apply_trace_kvs(rd, sim_ms, sys_out);
+    sync_replay_stage(rd, sim_ms, phases_out, cur_states_out, stage_out);
 
     std::sort(tail_out->begin(), tail_out->end(), [](const TailEntry& a, const TailEntry& b) {
         if (a.ts_ms != b.ts_ms) return a.ts_ms < b.ts_ms;

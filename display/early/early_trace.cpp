@@ -87,6 +87,13 @@ void trace_phase(
     write_trace_line(line);
 }
 
+void trace_stage(int64_t ts_ms, int step, const std::string& label, const std::string& raw_ms) {
+    if (!trace_is_open()) return;
+    std::string line = std::to_string(ts_ms) + "\tSTAGE\t" + std::to_string(step)
+        + "\t" + clean_tsv_field(label) + "\t" + clean_tsv_field(raw_ms);
+    write_trace_line(line);
+}
+
 void trace_tail(int64_t ts_ms, const char* source, const char* kind, const std::string& text) {
     if (!trace_is_open()) return;
     std::string line = std::to_string(ts_ms) + "\tTAIL\t" + source + "\t" + kind

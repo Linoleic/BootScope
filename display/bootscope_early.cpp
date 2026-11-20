@@ -607,6 +607,8 @@ int main(int argc, char** argv) {
     int frame_idx = 0;
     PhaseNode prev_traced_phases[6];
     bool has_traced_phases = false;
+    StageInfo prev_traced_stage;
+    bool has_traced_stage = false;
 
     int64_t loop_start = boottime_ms();
     bool saw_bootanim = false;
@@ -651,12 +653,14 @@ int main(int argc, char** argv) {
         int64_t now_ms = boottime_ms();
         if (replay_mode) {
             int64_t base_ms = replay_pre_sf ? replay_data.pre_start_ms : replay_data.start_ms;
-            int64_t step_ms = base_ms + (int64_t)llround((double)frame_idx * 250.0 * (double)replay_speed);
-            if (step_ms >= replay_data.end_ms) {
+            int64_t elapsed_ms = now_ms - loop_start;
+            if (elapsed_ms < 0) elapsed_ms = 0;
+            int64_t sim_now = base_ms + (int64_t)llround((double)elapsed_ms * (double)replay_speed);
+            if (sim_now >= replay_data.end_ms) {
                 now_ms = replay_data.end_ms;
                 replay_finished = true;
             } else {
-                now_ms = step_ms;
+                now_ms = sim_now;
             }
         }
         double uptime_s = now_ms / 1000.0;
@@ -760,7 +764,18 @@ int main(int argc, char** argv) {
                 }
             }
             if (stage.step == 0) {
-                stage = infer_native_stage(cur_states[3], cur_states[2]);
+                if (get_prop("sys.boot_completed") == "1" || get_prop("service.bootanim.exit") == "1") {
+                    stage = {10, "BOOT_COMPLETED", ""};
+                    for (int i = 2; i < 6; i++) {
+                        if (phases_snap[i].state != NodeState::Done) {
+                            phases_snap[i].state = NodeState::Done;
+                            phases_snap[i].start_ms = -1;
+                            phases_snap[i].end_ms = -1;
+                        }
+                    }
+                } else {
+                    stage = infer_native_stage(cur_states[3], cur_states[2]);
+                }
             }
             cur_states[9] = (stage.step >= 4) ? "RUN" : "-";
             if (cur_states[9] == "RUN" && svc_start_ms[9] < 0) svc_start_ms[9] = now_ms;
@@ -927,6 +942,13 @@ int main(int argc, char** argv) {
                 }
             }
             has_traced_phases = true;
+            if (!has_traced_stage || prev_traced_stage.step != stage.step
+                    || prev_traced_stage.label != stage.label
+                    || prev_traced_stage.raw_ms != stage.raw_ms) {
+                trace_stage(now_ms, stage.step, stage.label, stage.raw_ms);
+                prev_traced_stage = stage;
+                has_traced_stage = true;
+            }
         }
 
         if (first) {
