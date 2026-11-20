@@ -540,6 +540,29 @@ class PackagingAndModuleTests(unittest.TestCase):
                 self.assertEqual(archive.getinfo(sh).external_attr >> 16, 0o100755)
                 self.assertNotIn(b'\r\n', archive.read(sh))
 
+    def test_open_source_release_metadata(self):
+        import json
+        license_text = (ROOT / 'LICENSE').read_text(encoding='utf-8')
+        self.assertIn('GNU GENERAL PUBLIC LICENSE', license_text)
+        self.assertIn('Version 3', license_text)
+        for doc in ('README.md', 'README_EN.md', 'CHANGELOG.md', 'update.json', '.github/workflows/build.yml'):
+            self.assertTrue((ROOT / doc).is_file(), f'Missing {doc}')
+
+        prop_text = (ROOT / 'module' / 'module.prop').read_text(encoding='utf-8')
+        self.assertIn('author=Linoleic', prop_text)
+        self.assertIn('updateJson=https://raw.githubusercontent.com/Linoleic/BootScope/main/update.json', prop_text)
+
+        props = {}
+        for line in prop_text.splitlines():
+            if '=' in line:
+                k, v = line.split('=', 1)
+                props[k.strip()] = v.strip()
+        upd = json.loads((ROOT / 'update.json').read_text(encoding='utf-8'))
+        self.assertEqual(upd['version'], props['version'])
+        self.assertEqual(str(upd['versionCode']), props['versionCode'])
+        self.assertTrue(upd['zipUrl'].endswith(f"/bootscope-{props['version']}.zip"))
+        self.assertTrue(upd['changelog'].endswith('/CHANGELOG.md'))
+
 
 if __name__ == '__main__':
     unittest.main()

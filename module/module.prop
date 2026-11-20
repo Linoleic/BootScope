@@ -2,5 +2,6 @@ id=bootscope
 name=BootScope
 version=0.5.0
 versionCode=5
-author=BootScope
+author=Linoleic
 description=Unified C++ boot probe, early-boot display overlay, and KernelSU WebUI.
+updateJson=https://raw.githubusercontent.com/Linoleic/BootScope/main/update.json
