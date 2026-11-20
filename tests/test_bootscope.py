@@ -411,6 +411,8 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('"preact"', web_pkg)
         self.assertIn('"vite"', web_pkg)
         self.assertIn('window.ksu', web_bridge)
+        self.assertIn('bridge.exec(', web_bridge)
+        self.assertNotIn('const execFn', web_bridge)
         self.assertIn('list-json', web_bridge)
         self.assertIn('inspect-json', web_bridge)
         self.assertIn('compare-json', web_bridge)

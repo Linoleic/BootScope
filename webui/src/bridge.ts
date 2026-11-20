@@ -38,8 +38,8 @@ export function ksuExec(
   command: string,
   timeoutMs = 15000,
 ): Promise<{ errno: number; stdout: string; stderr: string }> {
-  const execFn = typeof window !== 'undefined' ? window.ksu?.exec : undefined;
-  if (!execFn) {
+  const bridge = typeof window !== 'undefined' ? window.ksu : undefined;
+  if (!bridge || typeof bridge.exec !== 'function') {
     return Promise.reject(new Error('bridge_unavailable'));
   }
   const cbName = `__bsKsu_${Date.now().toString(36)}_${cbSeq++}`;
@@ -61,7 +61,10 @@ export function ksuExec(
     };
 
     try {
-      execFn(command, JSON.stringify({}), cbName);
+      if (typeof bridge.exec !== 'function') {
+        throw new Error('bridge_unavailable');
+      }
+      bridge.exec(command, JSON.stringify({}), cbName);
     } catch (err) {
       if (!settled) {
         settled = true;
