@@ -9,6 +9,8 @@
 
 全模块以单一静态链接 `C++17` 原生二进制（`bootscope`）配合 Preact WebUI 构成：不改动系统分区，不替换原版 `bootanimation`，通过零 `fork` 原生采集与低开销早期渲染完成观测，并支持安全禁用显示或完整卸载。
 
+![BootScope HUD Demo](docs/assets/bootscope-hud-demo.gif)
+
 ## 核心能力
 
 - **早期原生屏幕 HUD**：在 KernelSU `on late-fs`（约开机 2–4 秒）启动独立 `SurfaceFlinger` 浮层，以 ~3 FPS 低频刷新展示关键启动路径、`*:E` 异常、核心服务与实时负载，并记录模块自身耗时（`self_cpu_ms`、`self_rss_kb`）。

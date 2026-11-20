@@ -9,6 +9,8 @@ BootScope is an early-boot on-screen HUD, full-chain boot profiler, and KernelSU
 
 The on-device runtime ships as a single static-libstdc++ `C++17` binary (`bootscope`) paired with a Preact WebUI. It leaves `/system` and stock `bootanimation` untouched, collects diagnostics inside one zero-fork native process, and can have its visual overlay disabled or cleanly uninstalled at any time.
 
+![BootScope HUD Demo](docs/assets/bootscope-hud-demo.gif)
+
 ## Capabilities
 
 - **Early Native SurfaceFlinger HUD**: Starts on KernelSU `on late-fs` (~2–4s uptime) with an independent `SurfaceFlinger` layer at ~3 FPS, surfacing critical boot stages, `*:E` errors, daemon states, and resource load alongside self-overhead telemetry (`self_cpu_ms`, `self_rss_kb`).
