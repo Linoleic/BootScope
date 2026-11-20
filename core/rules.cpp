@@ -81,6 +81,95 @@ bool has_sensitive_marker(const RuleSet& rules, const std::string& raw) {
     return false;
 }
 
+static size_t scan_token_end(const std::string& s, size_t start) {
+    size_t p = start;
+    while (p < s.size()) {
+        unsigned char c = (unsigned char)s[p];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n'
+                || c == ',' || c == ';' || c == ')' || c == ']'
+                || c == '}' || c == '"' || c == '\'') {
+            break;
+        }
+        p++;
+    }
+    return p;
+}
+
+std::string redact_sensitive_text(const RuleSet& rules, const std::string& raw) {
+    if (raw.empty() || rules.redact_key.empty()) return raw;
+    std::string cur = raw;
+    std::string low = lower_copy(cur);
+    int ops = 0;
+
+    for (const auto& kw_raw : rules.redact_key) {
+        if (kw_raw.empty()) continue;
+        std::string lkw = lower_copy(kw_raw);
+        size_t pos = 0;
+        while (ops < 32 && (pos = low.find(lkw, pos)) != std::string::npos) {
+            size_t end = pos + lkw.size();
+            size_t p = end;
+            while (p < cur.size() && (cur[p] == ' ' || cur[p] == '\t')) p++;
+
+            bool mask = false;
+            size_t val_start = std::string::npos;
+            size_t val_end = std::string::npos;
+
+            if (lkw.back() == '=') {
+                size_t vs = end;
+                while (vs < cur.size() && (cur[vs] == ' ' || cur[vs] == '\t' || cur[vs] == '"' || cur[vs] == '\'')) {
+                    vs++;
+                }
+                size_t ve = scan_token_end(cur, vs);
+                if (ve > vs) {
+                    mask = true;
+                    val_start = vs;
+                    val_end = ve;
+                }
+            } else if (p < cur.size() && (cur[p] == '=' || cur[p] == ':')) {
+                size_t vs = p + 1;
+                while (vs < cur.size() && (cur[vs] == ' ' || cur[vs] == '\t' || cur[vs] == '"' || cur[vs] == '\'')) {
+                    vs++;
+                }
+                size_t ve = scan_token_end(cur, vs);
+                if (ve > vs) {
+                    mask = true;
+                    val_start = vs;
+                    val_end = ve;
+                }
+            } else if (p > end && p < cur.size()) {
+                size_t vs = p;
+                if (cur[vs] == '"' || cur[vs] == '\'') vs++;
+                size_t ve = scan_token_end(cur, vs);
+                if (ve > vs) {
+                    bool looks_val = false;
+                    for (size_t k = vs; k < ve; k++) {
+                        unsigned char ch = (unsigned char)cur[k];
+                        if (isdigit(ch) || ch == ':') {
+                            looks_val = true;
+                            break;
+                        }
+                    }
+                    if (looks_val) {
+                        mask = true;
+                        val_start = vs;
+                        val_end = ve;
+                    }
+                }
+            }
+
+            if (mask && !(val_end - val_start == 3 && cur.compare(val_start, 3, "***") == 0)) {
+                cur.replace(val_start, val_end - val_start, "***");
+                low = lower_copy(cur);
+                pos = val_start + 3;
+                ops++;
+            } else {
+                pos = end;
+            }
+        }
+    }
+    return cur;
+}
+
 bool matches_module_key(const RuleSet& rules, const std::string& raw) {
     for (const auto& kw : rules.module_key) {
         if (icontains(raw, kw.c_str())) return true;
@@ -117,11 +206,12 @@ bool matches_ignore_tag(const RuleSet& rules, const std::string& tag) {
 }
 
 std::string sanitize_tail_text(const RuleSet& rules, const std::string& raw, size_t max_len) {
-    if (raw.empty() || has_sensitive_marker(rules, raw)) return "";
+    if (raw.empty() || max_len == 0) return "";
+    std::string masked = redact_sensitive_text(rules, raw);
     std::string out;
-    out.reserve(std::min(raw.size(), max_len));
+    out.reserve(std::min(masked.size(), max_len));
     bool prev_space = true;
-    for (unsigned char uc : raw) {
+    for (unsigned char uc : masked) {
         char ch = (char)toupper(uc);
         bool keep = (strchr(kFontChars, ch) != nullptr);
         bool map_space = (ch == ' ' || ch == '\t' || ch == '(' || ch == ')'
@@ -143,11 +233,12 @@ std::string sanitize_tail_text(const RuleSet& rules, const std::string& raw, siz
 }
 
 std::string sanitize_trace_text(const RuleSet& rules, const std::string& raw, size_t max_len) {
-    if (raw.empty() || max_len == 0 || has_sensitive_marker(rules, raw)) return "";
+    if (raw.empty() || max_len == 0) return "";
+    std::string masked = redact_sensitive_text(rules, raw);
     std::string out;
-    out.reserve(std::min(raw.size(), max_len));
+    out.reserve(std::min(masked.size(), max_len));
     bool prev_space = true;
-    for (unsigned char uc : raw) {
+    for (unsigned char uc : masked) {
         if (uc == ' ' || uc == '\t' || uc == '\r' || uc == '\n') {
             if (!prev_space) {
                 out.push_back(' ');

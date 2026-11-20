@@ -760,7 +760,7 @@ int run_display(const DisplayOptions& opts, int argc, char** argv) {
             if (first && !cur_psi[0].valid) {
                 push_tail(&ev_state, now_ms, "M", TailKind::ModuleError, "ERR PSI UNAVAIL", "MOD:PSI");
             }
-            if ((frame_idx % 2) == 0) {
+            if ((frame_idx % 3) == 0) {
                 sys_metrics = collect_sys_metrics(now_ms, &sys_state);
             }
             populate_resource_rows(&sys_metrics, cpu_pct, io_pct, mem_pct);
@@ -972,7 +972,7 @@ int run_display(const DisplayOptions& opts, int argc, char** argv) {
         }
 
         if (!preview && !replay_mode) {
-            if (svc_changed || (frame_idx % 2) == 0) {
+            if (svc_changed || (frame_idx % 3) == 0) {
                 trace_metric(now_ms, cpu_pct, io_pct, mem_pct, sys_metrics, cur_states, kSvcCount);
             }
             for (const auto& r : sys_metrics.rows) trace_kv(now_ms, r.key, r.text, r.alert);
@@ -1007,7 +1007,7 @@ int run_display(const DisplayOptions& opts, int argc, char** argv) {
         }
         frame_idx++;
         if (!(replay_mode && replay_finished)) {
-            usleep(250000);
+            usleep(replay_mode ? 250000 : 333000);
         }
     }
 

@@ -172,13 +172,16 @@ void push_tail(
     for (auto& existing : st->tail) {
         bool same_msg = (existing.source == source && existing.text == text);
         bool same_err_tag = (!group.empty() && existing.source == source && existing.group == group);
+        bool same_full = (existing.source == source
+                          && (!existing.trace_text.empty() ? existing.trace_text == trace_text : existing.text == text));
         if (same_msg || same_err_tag) {
             bool is_err = (kind == TailKind::Error || kind == TailKind::ModuleError);
-            bool emit_trace = (kind != TailKind::Stage) && ((is_err && !same_msg) || (ts_ms - existing.ts_ms >= 2000));
+            bool emit_trace = (kind != TailKind::Stage) && ((is_err && !same_full) || (ts_ms - existing.ts_ms >= 2000));
             if (ts_ms >= existing.ts_ms) {
                 if (emit_trace) trace_tail(ts_ms, source, kind_str, trace_text);
                 existing.ts_ms = ts_ms;
                 existing.text = std::move(text);
+                existing.trace_text = trace_text;
                 existing.kind = kind;
                 existing.seq = st->next_seq++;
             }
@@ -196,6 +199,7 @@ void push_tail(
     entry.source = source;
     entry.group = group;
     entry.text = std::move(text);
+    entry.trace_text = std::move(trace_text);
     entry.kind = kind;
     st->tail.push_back(std::move(entry));
     std::sort(st->tail.begin(), st->tail.end(), [](const TailEntry& a, const TailEntry& b) {
@@ -532,11 +536,16 @@ bool is_stack_trace_noise(const char* msg) {
     while (*msg == ' ' || *msg == '\t') msg++;
     if (!*msg) return true;
     if (strncmp(msg, "at ", 3) == 0) return true;
-    if (strncmp(msg, "Caused by:", 10) == 0) return true;
     if (strncmp(msg, "... ", 4) == 0) return true;
     if (strncmp(msg, "Suppressed:", 11) == 0) return true;
     if (msg[0] == '#' && isdigit((unsigned char)msg[1])) return true;
     return false;
+}
+
+static bool is_caused_by_line(const char* msg) {
+    if (!msg) return false;
+    while (*msg == ' ' || *msg == '\t') msg++;
+    return strncmp(msg, "Caused by:", 10) == 0;
 }
 
 void* err_reader_thread(void* arg) {
@@ -587,7 +596,19 @@ void* err_reader_thread(void* arg) {
                     int64_t ts_ms = (sec < 0.0 || sec > 86400.0)
                         ? boottime_ms()
                         : (int64_t)llround(sec * 1000.0);
-                    if (matches_module_key(st->rules, tag_str) || matches_module_key(st->rules, msg)) {
+                    bool is_mod = matches_module_key(st->rules, tag_str) || matches_module_key(st->rules, msg);
+                    if (is_caused_by_line(msg)) {
+                        if (is_mod || !matches_ignore_tag(st->rules, tag_str)) {
+                            std::string tline = sanitize_trace_text(
+                                st->rules, is_mod ? ("ERR " + full) : full, 512);
+                            if (!tline.empty()) {
+                                trace_tail(ts_ms, is_mod ? "M" : (lvl == 'F' ? "F" : "E"),
+                                           is_mod ? "MERR" : "ERR", tline);
+                            }
+                        }
+                        continue;
+                    }
+                    if (is_mod) {
                         push_tail(st, ts_ms, "M", TailKind::ModuleError, "ERR " + full, "MOD:" + tag_str);
                     } else if (!matches_ignore_tag(st->rules, tag_str)) {
                         const char* src = (lvl == 'F') ? "F" : "E";

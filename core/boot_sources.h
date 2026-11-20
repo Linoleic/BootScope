@@ -32,6 +32,7 @@ struct TailEntry {
     std::string group;
     std::string text;
     TailKind kind = TailKind::Info;
+    std::string trace_text;
 };
 
 enum class NodeState {

@@ -19,6 +19,7 @@ struct RuleSet {
 void init_builtin_rules(RuleSet* r);
 void load_rules(RuleSet* r);
 bool has_sensitive_marker(const RuleSet& rules, const std::string& raw);
+std::string redact_sensitive_text(const RuleSet& rules, const std::string& raw);
 bool matches_module_key(const RuleSet& rules, const std::string& raw);
 bool matches_ignore_cmd(const RuleSet& rules, const std::string& full_cmd);
 bool matches_ignore_svc(const RuleSet& rules, const std::string& svc);

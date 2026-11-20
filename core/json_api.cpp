@@ -327,7 +327,7 @@ std::vector<TailEntry> collect_trace_entries(const RunSnapshotBundle& b) {
     if (b.rd.has_trace && !b.rd.trace_tails.empty()) {
         out.reserve(b.rd.trace_tails.size());
         for (const auto& tt : b.rd.trace_tails) {
-            out.push_back({tt.ts_ms, 0, tt.source, "", tt.text, tt.kind});
+            out.push_back({tt.ts_ms, 0, tt.source, "", tt.text, tt.kind, {}});
         }
     } else {
         out = b.tails;
@@ -525,33 +525,94 @@ int cmd_inspect_json(const std::string& target) {
     printf("],");
 
     struct PsiOut { int64_t ts_ms; int cpu; int io; int mem; };
-    std::vector<PsiOut> psi_out;
+    auto clamp_pct = [](int v) { return std::min(100, std::max(0, v)); };
+    std::vector<PsiOut> psi_from_trace;
+    for (const auto& tm : b.rd.trace_metrics) {
+        if (tm.cpu_pct < 0 && tm.io_pct < 0 && tm.mem_pct < 0) continue;
+        if (!psi_from_trace.empty() && tm.ts_ms <= psi_from_trace.back().ts_ms) continue;
+        psi_from_trace.push_back({
+            tm.ts_ms,
+            clamp_pct(tm.cpu_pct),
+            clamp_pct(tm.io_pct),
+            clamp_pct(tm.mem_pct),
+        });
+    }
+
+    std::vector<PsiOut> psi_from_file;
     for (size_t i = 0; i < b.rd.psi_points.size(); i++) {
         const auto& pt = b.rd.psi_points[i];
-        int c = (int)lround(pt.cpu_a), io_v = (int)lround(pt.io_a), m = (int)lround(pt.mem_a);
+        int c = clamp_pct((int)lround(pt.cpu_a));
+        int io_v = clamp_pct((int)lround(pt.io_a));
+        int m = clamp_pct((int)lround(pt.mem_a));
         if (i > 0) {
             int64_t dt = pt.ts_ms - b.rd.psi_points[i - 1].ts_ms;
             if (dt > 0) {
                 auto pct = [&](uint64_t cur, uint64_t prev) {
                     if (cur < prev) return 0;
                     int v = (int)lround(((double)(cur - prev) / ((double)dt * 1000.0)) * 100.0);
-                    return std::min(100, std::max(0, v));
+                    return clamp_pct(v);
                 };
                 c = pct(pt.cpu_t, b.rd.psi_points[i - 1].cpu_t);
                 io_v = pct(pt.io_t, b.rd.psi_points[i - 1].io_t);
                 m = pct(pt.mem_t, b.rd.psi_points[i - 1].mem_t);
             }
         }
-        psi_out.push_back({pt.ts_ms, c, io_v, m});
+        psi_from_file.push_back({pt.ts_ms, c, io_v, m});
     }
+
+    std::vector<PsiOut> psi_merged;
+    if (psi_from_trace.empty()) {
+        psi_merged = std::move(psi_from_file);
+    } else {
+        psi_merged = psi_from_trace;
+        for (size_t i = 0; i < psi_from_file.size(); i++) {
+            const auto& pt = psi_from_file[i];
+            if (i == 0 && psi_from_file.size() > 1 && pt.ts_ms >= psi_from_trace.front().ts_ms - 250) {
+                continue;
+            }
+            bool include = (pt.ts_ms < psi_from_trace.front().ts_ms - 250)
+                        || (pt.ts_ms > psi_from_trace.back().ts_ms + 250);
+            if (!include) {
+                for (size_t j = 1; j < psi_from_trace.size(); j++) {
+                    int64_t t0 = psi_from_trace[j - 1].ts_ms;
+                    int64_t t1 = psi_from_trace[j].ts_ms;
+                    if (t1 - t0 > 1800 && pt.ts_ms >= t0 + 400 && pt.ts_ms <= t1 - 400) {
+                        include = true;
+                        break;
+                    }
+                }
+            }
+            if (include) {
+                psi_merged.push_back(pt);
+            }
+        }
+        std::sort(psi_merged.begin(), psi_merged.end(),
+                  [](const PsiOut& a, const PsiOut& b) { return a.ts_ms < b.ts_ms; });
+    }
+
+    std::vector<PsiOut> psi_out;
+    psi_out.reserve(psi_merged.size());
+    for (const auto& pt : psi_merged) {
+        if (!psi_out.empty() && pt.ts_ms <= psi_out.back().ts_ms) continue;
+        psi_out.push_back(pt);
+    }
+
     printf("\"psi_series\":[");
-    size_t step = psi_out.size() > 40 ? (psi_out.size() / 40 + 1) : 1;
+    size_t step = psi_out.size() > 120 ? (psi_out.size() / 120 + 1) : 1;
     bool first_psi = true;
-    for (size_t i = 0; i < psi_out.size(); i += step) {
+    size_t last_emitted = 0;
+    auto emit_psi = [&](size_t idx) {
         if (!first_psi) putchar(',');
         first_psi = false;
+        last_emitted = idx;
         printf("{\"ts_ms\":%lld,\"cpu\":%d,\"io\":%d,\"mem\":%d}",
-               (long long)psi_out[i].ts_ms, psi_out[i].cpu, psi_out[i].io, psi_out[i].mem);
+               (long long)psi_out[idx].ts_ms, psi_out[idx].cpu, psi_out[idx].io, psi_out[idx].mem);
+    };
+    for (size_t i = 0; i < psi_out.size(); i += step) {
+        emit_psi(i);
+    }
+    if (!psi_out.empty() && last_emitted != psi_out.size() - 1) {
+        emit_psi(psi_out.size() - 1);
     }
     printf("],");
 
