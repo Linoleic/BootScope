@@ -545,8 +545,14 @@ class PackagingAndModuleTests(unittest.TestCase):
         license_text = (ROOT / 'LICENSE').read_text(encoding='utf-8')
         self.assertIn('GNU GENERAL PUBLIC LICENSE', license_text)
         self.assertIn('Version 3', license_text)
-        for doc in ('README.md', 'README_EN.md', 'CHANGELOG.md', 'update.json', '.github/workflows/build.yml'):
+        for doc in (
+            'README.md', 'README_EN.md', 'CHANGELOG.md', 'update.json',
+            'docs/ARCHITECTURE.md', 'docs/ARCHITECTURE_EN.md',
+            '.github/workflows/build.yml',
+        ):
             self.assertTrue((ROOT / doc).is_file(), f'Missing {doc}')
+        self.assertIn('docs/ARCHITECTURE.md', (ROOT / 'README.md').read_text(encoding='utf-8'))
+        self.assertIn('docs/ARCHITECTURE_EN.md', (ROOT / 'README_EN.md').read_text(encoding='utf-8'))
 
         prop_text = (ROOT / 'module' / 'module.prop').read_text(encoding='utf-8')
         self.assertIn('author=Linoleic', prop_text)

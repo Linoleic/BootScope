@@ -6,6 +6,8 @@
 
 BootScope 是一个面向现代 `arm64-v8a` Android 设备的**早期启动状态 HUD、全链路启动剖析与 KernelSU WebUI 可视化工具**，采用 **单一原生 C++17 核心二进制 + TypeScript/Preact WebUI + PC Python 离线分析套件** 架构。
 
+> 开发者文档：**[架构设计说明 (中文)](docs/ARCHITECTURE.md)** | **[Architecture Guide (English)](docs/ARCHITECTURE_EN.md)**
+
 ---
 
 ## 核心特性

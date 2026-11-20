@@ -6,6 +6,8 @@
 
 BootScope is an **early-boot on-screen HUD overlay, full-chain boot profiler, and KernelSU WebUI dashboard** for modern `arm64-v8a` Android devices. It is built around a **single native C++17 binary (`bootscope`) + a TypeScript/Preact KernelSU WebUI + a Python PC offline analysis suite**.
 
+> Developer Docs: **[Architecture Guide (English)](docs/ARCHITECTURE_EN.md)** | **[架构设计说明 (中文)](docs/ARCHITECTURE.md)**
+
 ---
 
 ## Key Features
