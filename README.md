@@ -13,7 +13,7 @@ python .\build_module.py
 构建脚本会：
 1. 使用 NDK（C++17 + `-static-libstdc++`）编译 `core/*.cpp` 为单一可执行文件 `bootscope`。
 2. 在 `webui/` 运行 `tsc --noEmit && vite build` 生成静态资源到 `dist/webroot/`（可用 `--skip-webui` 复用现有产物）。
-3. 打包为 `dist/bootscope-0.5.0.zip`。
+3. 打包为 `dist/bootscope-0.5.0.zip`。支持 KernelSU 热安装（`KSU_HAS_HOT_INSTALL=true`）且 `initrc/bootscope.rc` 入口已在 `/metadata/vold/ksu/modules.rc` 激活时，[customize.sh](module/customize.sh) 会自动请求免重启更新（`MODULE_HOT_INSTALL_REQUEST=true`）。
 
 ## 架构概览
 

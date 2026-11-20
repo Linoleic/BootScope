@@ -442,6 +442,9 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('bootscope_rules.conf', customize_sh)
         self.assertIn('KSU', customize_sh)
         self.assertIn('arm64-v8a', customize_sh)
+        self.assertIn('KSU_HAS_HOT_INSTALL', customize_sh)
+        self.assertIn('MODULE_HOT_INSTALL_REQUEST=true', customize_sh)
+        self.assertIn('/metadata/vold/ksu/bootscope early', customize_sh)
         self.assertNotRegex(customize_sh, r'(?m)^\s*exit\b')
 
         uninstall_sh = (ROOT / 'module' / 'uninstall.sh').read_text(encoding='utf-8')

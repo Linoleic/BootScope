@@ -25,3 +25,10 @@ if [ -n "$KSU" ] && [ "$ABI" = "arm64-v8a" ] && [ -f "$MODPATH/bootscope" ]; the
         rm -f "$KSU_EARLY_DIR/bootscope_disable_display"
     fi
 fi
+
+# Request KernelSU rebootless hot install when early initrc entry is already active.
+if [ "$KSU_HAS_HOT_INSTALL" = "true" ]; then
+    if [ "$ABI" != "arm64-v8a" ] || grep -Fq '/metadata/vold/ksu/bootscope early' /metadata/vold/ksu/modules.rc 2>/dev/null; then
+        export MODULE_HOT_INSTALL_REQUEST=true
+    fi
+fi
