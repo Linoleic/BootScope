@@ -7,7 +7,21 @@
 #include <string.h>
 #include <string>
 
+#if __has_include("bootscope_build_info.h")
+#include "bootscope_build_info.h"
+#endif
+
+#ifndef BOOTSCOPE_PACKAGE_VERSION
+#define BOOTSCOPE_PACKAGE_VERSION "unknown"
+#endif
+#ifndef BOOTSCOPE_GIT_REVISION
+#define BOOTSCOPE_GIT_REVISION "unknown"
+#endif
+
 namespace {
+
+const char* const kBuildVersion = BOOTSCOPE_PACKAGE_VERSION;
+const char* const kBuildRevision = BOOTSCOPE_GIT_REVISION;
 
 void print_usage() {
     fprintf(stderr,
@@ -23,7 +37,8 @@ void print_usage() {
             "  summary <latest|boot_id|dir>\n"
             "  prune --keep <N>\n"
             "  config-get | config-set <key> <val>\n"
-            "  rules-get  | rules-set\n");
+            "  rules-get  | rules-set\n"
+            "  version\n");
 }
 
 }  // namespace
@@ -33,6 +48,11 @@ int main(int argc, char** argv) {
 
     std::string sub = (argc >= 2) ? argv[1] : "early";
     int arg_start = 2;
+
+    if (sub == "--version" || sub == "-V" || sub == "version") {
+        printf("BootScope %s (%s)\n", kBuildVersion, kBuildRevision);
+        return 0;
+    }
 
     if (sub == "--preview" || sub == "--replay" || sub == "--in-tmp"
             || sub == "--bl" || sub == "--pre-sf" || sub == "--speed") {

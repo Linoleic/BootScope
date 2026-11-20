@@ -519,6 +519,7 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('summary latest', action_sh)
 
     def test_build_module_zip_layout(self):
+        import struct
         cmd = [sys.executable, str(ROOT / 'build_module.py')]
         if (ROOT / 'dist' / 'webroot' / 'index.html').is_file():
             cmd.append('--skip-webui')
@@ -529,32 +530,50 @@ class PackagingAndModuleTests(unittest.TestCase):
         with ZipFile(archive_path, 'r') as archive:
             names = set(archive.namelist())
             for req in (
-                'module.prop', 'action.sh', 'service.sh', 'probe.sh', 'display.sh',
+                'module.prop', 'LICENSE', 'action.sh', 'service.sh', 'probe.sh', 'display.sh',
                 'customize.sh', 'uninstall.sh', 'rules.conf', 'initrc/bootscope.rc',
                 'bootscope', 'webroot/index.html',
             ):
                 self.assertIn(req, names)
             self.assertNotIn('classes.dex', names)
+            packed_prop = archive.read('module.prop').decode('utf-8')
+            self.assertNotIn('\r\n', packed_prop)
+            self.assertRegex(
+                packed_prop,
+                r'(?m)^version=' + re.escape(version) + r'-r[1-9]\d*(-local)?$',
+            )
+            self.assertIn('versionCode=500', packed_prop)
+            bootscope_bin = archive.read('bootscope')
+            self.assertEqual(bootscope_bin[:6], b'\x7fELF\x02\x01')
+            self.assertEqual(struct.unpack_from('<H', bootscope_bin, 18)[0], 183)
             self.assertEqual(archive.getinfo('bootscope').external_attr >> 16, 0o100755)
             for sh in ('action.sh', 'service.sh', 'probe.sh', 'display.sh'):
                 self.assertEqual(archive.getinfo(sh).external_attr >> 16, 0o100755)
                 self.assertNotIn(b'\r\n', archive.read(sh))
 
     def test_open_source_release_metadata(self):
+        import importlib.util
         import json
         license_text = (ROOT / 'LICENSE').read_text(encoding='utf-8')
         self.assertIn('GNU GENERAL PUBLIC LICENSE', license_text)
         self.assertIn('Version 3', license_text)
         for doc in (
-            'README.md', 'README_EN.md', 'CHANGELOG.md', 'update.json',
+            'README.md', 'README_EN.md', 'BUILD.md', 'BUILD_EN.md',
+            'CHANGELOG.md', 'update.json', 'tools/ci_release.py',
             'docs/ARCHITECTURE.md', 'docs/ARCHITECTURE_EN.md',
-            '.github/workflows/build.yml',
+            '.github/workflows/build.yml', '.github/workflows/release.yml',
         ):
             self.assertTrue((ROOT / doc).is_file(), f'Missing {doc}')
-        self.assertIn('docs/ARCHITECTURE.md', (ROOT / 'README.md').read_text(encoding='utf-8'))
-        self.assertIn('docs/ARCHITECTURE_EN.md', (ROOT / 'README_EN.md').read_text(encoding='utf-8'))
+        readme_zh = (ROOT / 'README.md').read_text(encoding='utf-8')
+        readme_en = (ROOT / 'README_EN.md').read_text(encoding='utf-8')
+        self.assertIn('docs/ARCHITECTURE.md', readme_zh)
+        self.assertIn('BUILD.md', readme_zh)
+        self.assertIn('docs/ARCHITECTURE_EN.md', readme_en)
+        self.assertIn('BUILD_EN.md', readme_en)
 
         prop_text = (ROOT / 'module' / 'module.prop').read_text(encoding='utf-8')
+        self.assertIn('version=v0.5.0', prop_text)
+        self.assertIn('versionCode=500', prop_text)
         self.assertIn('author=Linoleic', prop_text)
         self.assertIn('updateJson=https://raw.githubusercontent.com/Linoleic/BootScope/main/update.json', prop_text)
 
@@ -568,6 +587,16 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertEqual(str(upd['versionCode']), props['versionCode'])
         self.assertTrue(upd['zipUrl'].endswith(f"/bootscope-{props['version']}.zip"))
         self.assertTrue(upd['changelog'].endswith('/CHANGELOG.md'))
+
+        spec = importlib.util.spec_from_file_location('ci_release', ROOT / 'tools' / 'ci_release.py')
+        ci_release = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ci_release)
+        with tempfile.TemporaryDirectory() as tmp:
+            notes_out = Path(tmp) / 'release-notes.md'
+            ci_release.prepare(ROOT, props['version'], notes_out)
+            notes = notes_out.read_text(encoding='utf-8')
+            self.assertTrue(notes.startswith(f"## [{props['version']}]\n"))
+            self.assertIn('### 新增', notes)
 
 
 if __name__ == '__main__':

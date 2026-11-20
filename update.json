@@ -1,6 +1,6 @@
 {
-  "version": "0.5.0",
-  "versionCode": 5,
-  "zipUrl": "https://github.com/Linoleic/BootScope/releases/download/v0.5.0/bootscope-0.5.0.zip",
+  "version": "v0.5.0",
+  "versionCode": 500,
+  "zipUrl": "https://github.com/Linoleic/BootScope/releases/download/v0.5.0/bootscope-v0.5.0.zip",
   "changelog": "https://raw.githubusercontent.com/Linoleic/BootScope/main/CHANGELOG.md"
 }

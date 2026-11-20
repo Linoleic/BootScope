@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test and build release
+    uses: ./.github/workflows/build.yml
+
+  release:
+    name: Publish tagged release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bootscope-module
+          path: dist
+
+      - name: Verify release inputs
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -- dist/bootscope-v*.zip
+          test "$#" -eq 1
+          python3 tools/ci_release.py --tag "$RELEASE_TAG" --package "$1" --revision "$GITHUB_SHA"
+
+      - name: Publish exact changelog section and ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          # Never overwrite an existing release or replace its tested assets.
+          set -- dist/bootscope-v*.zip
+          test "$#" -eq 1
+          gh release create "$RELEASE_TAG" "$1" \
+            --verify-tag --title "$RELEASE_TAG" --notes-file dist/release-notes.md --draft
+          gh release edit "$RELEASE_TAG" --draft=false --latest
