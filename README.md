@@ -5,136 +5,73 @@
 [![Platform](https://img.shields.io/badge/Platform-Android%20%28arm64--v8a%29-blue.svg)](https://developer.android.com)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-面向现代 `arm64-v8a` Android 设备的早期启动状态 HUD、全链路启动剖析与 KernelSU WebUI 管理模块。在开机过程中原位显示关键阶段、异常日志与系统压力，并在开机后提供完整的数据回看与对比能力。
+面向 `arm64-v8a` Android 设备的早期启动状态 HUD、全链路启动剖析与 KernelSU WebUI 分析工具，用于观测从 Bootloader（POR）到 `sys.boot_completed` 之间的启动阶段耗时、内核/框架异常与系统资源瓶颈。
 
-本项目希望让已经配置 Root 环境的开发者与折腾用户，无需连接电脑或手动抓取多份系统日志，就能直观定位开机变慢、Bootloader 耗时波动、守护进程阻塞或模块报错的真实原因。
+全模块以单一静态链接 `C++17` 原生二进制（`bootscope`）配合 Preact WebUI 构成：不改动系统分区，不替换原版 `bootanimation`，通过零 `fork` 原生采集与低开销早期渲染完成观测，并支持安全禁用显示或完整卸载。
 
-工作过程不修改系统分区，也不替换原版开机动画。采集与显示全部在模块自研的独立原生层与私有目录内完成，可随时开关浮层显示或卸载清理。
+## 核心能力
 
-## 功能
+- **早期原生屏幕 HUD**：在 KernelSU `on late-fs`（约开机 2–4 秒）启动独立 `SurfaceFlinger` 浮层，以 ~3 FPS 低频刷新展示关键启动路径、`*:E` 异常、核心服务与实时负载，并记录模块自身耗时（`self_cpu_ms`、`self_rss_kb`）。
+- **多平台 Bootloader 分段解析**：读取高通 UEFI/KPI、`ro.boot.boottime*` 与联发科 `/proc/bootprof`，与 Android init 及框架阶段对齐至同一时间轴。
+- **高密度资源曲线与趋势分析**：合并 `early-trace.tsv`（`METRIC`）与后期 `psi.tsv` 采样，使用 Fritsch-Carlson 单调三次样条绘制平滑 CPU / IO / MEM 曲线，配合连续滑动标尺定位任意时刻占比，并在多轮重启间追踪耗时波动。
+- **独立「启动日志」视图**：支持按严重程度分组（`F` / `E` / `M ERR` / `INIT` / `STAGE` / `INFO`）与按启动阶段分割线时间线混排，完整保留 Java `Caused by:` 堆栈根因并支持一键复制。
+- **A/B 启动对比与屏幕回放**：支持任意两次启动的阶段差值与 `Bootloader 分段耗时差异 (B - A)`，支持在真机直接触发 `--bl --pre-sf` 全链路屏幕回放（`action.sh`）。
 
-- 在开机 `late-fs` 阶段拉起早期原生屏幕浮层，实时展示阶段进度、错误摘要、核心服务与资源压力。
-- 解析 Qualcomm、MediaTek 与 `ro.boot.boottime*` 的 Bootloader 耗时，并与系统启动甘特时间线对齐。
-- 合并高频早期压力采样与后期 `psi.tsv`，在 WebUI 中渲染平滑 CPU / IO / MEM 曲线并用连续滑动标尺查看任意时刻指标。
-- 追踪多次开机的历史耗时趋势，支持按严重程度分组与按启动阶段混排的独立「启动日志」排查视图。
-- 对两次启动执行 A/B 分段耗时与 Bootloader 差异对比，并在设备上直接执行全链路屏幕回放（`--bl --pre-sf`）。
-- 支持在线开关显示浮层、清理历史运行目录以及自定义 `rules.conf` 过滤、模块高亮与就地脱敏规则。
+## 观测数据源与覆盖范围
 
-## 使用要求
-
-- `arm64-v8a` 设备，系统版本为 **Android 13 及以上（API 33+）**。
-- 已获取 Root 权限；**KernelSU / SukiSU-Ultra** 具备完整能力（早期 `initrc`、WebUI 与免重启热更新），其他 Root 管理器保留后期 `late_native` 显示与后台采集降级路径。
-- 已在小米（Qualcomm，Android 16，SukiSU-Ultra）与 Google Pixel 7 Pro（Tensor，Android 17，KernelSU）实机验证；不同 ROM 或内核的 Bootloader 原始日志完整度可能存在差异。
-
-## 安装与使用
-
-1. 从本项目的 [Releases](https://github.com/Linoleic/BootScope/releases) 下载模块 ZIP（或按 [BUILD.md](BUILD.md) 自行构建）。
-2. 在 KernelSU 管理器中选择模块压缩包安装。首次安装后需重启一次设备，以激活 `initrc/bootscope.rc` 早期入口；后续版本升级支持免重启热安装。
-3. 重启开机过程中，屏幕上方将显示早期状态 HUD 浮层并在桌面就绪时自动退出。
-4. 进入桌面后打开 KernelSU 管理器中的 **BootScope → WebUI**，查看本次开机的甘特图、平滑 PSI 曲线、启动日志与历史对比。
-5. 需要重新观察本次启动画面时，可在模块卡片点击 **Action** 触发 `--bl --pre-sf` 屏幕回放。
-
-```text
-首次安装重启 -> 开机 early_native 屏幕显示 + 全程采样落盘
-开机后进入 WebUI -> 查看甘特图 / 平滑压力曲线 / 启动日志 / A/B 对比
-```
-
-## 实现方式与特点
-
-### 无侵入早期显示与运行时适配
-
-模块在 `on late-fs` 由 KernelSU `initrc` 启动单一原生二进制 `bootscope early`，通过运行时 `dlopen` 与多版本符号回退连接 `SurfaceComposerClient` 创建独立浮层窗口，不改动原版 `bootanimation` 与系统镜像。
-
-实际开机阶段按约 3 FPS（`333ms`）低频率刷新并记录自身开销（`self_cpu_ms`、`self_rss_kb`）；当早期帧未能触发且动画仍在运行时，由后期脚本自动尝试 `late_native` 回退显示。
-
-### 零 `fork` 原生采集与全链路对齐
-
-`bootscope collect` 在后台直接通过 `__system_property_foreach`、`/proc/pressure/*`、`/proc/[pid]/stat` 与内核/事件日志完成周期采集，避免 shell 频繁派生进程影响开机耗时本身。
-
-结合早期记录的 `early-trace.tsv` 与后期样本，WebUI 可还原从通电（Bootloader）、Init、SurfaceFlinger 到 `boot_completed` 的连续时间轴与毫秒级资源占用变化。
-
-### 保留诊断现场的就地脱敏
-
-针对 `imei`、`android_id`、`token=`、`password` 等敏感配置，`redact_key` 采用 **就地脱敏**（将其值替换为 `***`），而不直接丢弃整行故障日志，避免排查启动错误时失去关键上下文，并完整保留 Java `Caused by:` 根因行供「启动日志」页追踪。
-
-### 与其他定位方式的区别
-
-| 方式 | 用户需要维护的主要成本 | 本项目的选择 |
+| 观测维度 | 设备端数据源 | 说明 |
 | --- | --- | --- |
-| 电脑连接 `adb logcat` / `dmesg` | 需提前接线配对，无法捕获早期无 ADB 阶段画面 | 设备本地自主记录早期轨迹与历史开机档 |
-| 手动抓取 `bootchart` / Perfetto | 配置门槛高，需导出到电脑专用工具查看 | 开机过程零操作，手机端 WebUI 直接可视化分析 |
-| 传统后期 `service.sh` 脚本 | 起步过晚，错过早期 `late-fs` 服务与错误现场 | 通过 KernelSU `initrc` 约 2–4 秒内切入渲染与追踪 |
-| BootScope | 保持 Root / KernelSU 环境及按需配置 `rules.conf` | 原生采集 + 早期 HUD + 手机端 WebUI 一体闭环 |
+| **Bootloader 耗时** | `/dev/logfs/UefiLog0.txt`、`boot_stats` KPI、`ro.boot.boottime*`、`/proc/bootprof` | 随芯片与内核暴露节点自动匹配并对齐至通电基准；缺失时安全降级 |
+| **早期轨迹与状态机** | `dmesg`、`events`、`/dev/bootscope_early_trace.tsv` | 记录 `late-fs` 起的关键阶段转换、早期事件与高精度 `METRIC` 采样 |
+| **系统属性与服务** | `__system_property_foreach` | 单进程无 `fork` 轮询 `init.svc.*`、`ro.boottime.*` 与启动完成标志 |
+| **资源压力与热点进程** | `/proc/pressure/{cpu,io,memory}`、`/proc/[pid]/stat` | 统计开机期间 CPU / IO / MEM PSI 压力波动及 Top CPU 进程占用 |
+| **异常日志与脱敏** | `logcat *:E`、`init` 错误、`rules.conf` | 按 `redact_key` 对敏感键值做**就地脱敏（`***`）**，保留故障上下文 |
 
-各方式的具体适用场景取决于设备形态。BootScope 的早期浮层与 `SurfaceFlinger` 符号解析同样受制于厂商系统版本演变，部分机型可能回退为仅提供后期采集与 WebUI 分析。
+## WebUI 与命令行
 
-## WebUI
+### WebUI 页面
 
-| 页面 | 用途 |
+| 页面 | 功能 |
 | --- | --- |
-| 总览 | 查看启动摘要、Bootloader 剖析、甘特时间轴、平滑 PSI 曲线与历史趋势 |
-| 启动日志 | 按严重程度分组（`F` / `E` / `M ERR` / `INIT` / `STAGE` / `INFO`）或按阶段时间线排查并一键复制 |
-| 对比 | 选定两次历史启动执行 A/B 关键阶段差值与 Bootloader 分段差异对比 |
-| 设置 | 开关屏幕 HUD 显示、调节全链路回放参数、清理历史记录及在线编辑 `rules.conf` |
+| 总览 | 单次启动耗时摘要、Bootloader 分段剖析、全链路甘特图、平滑 PSI 曲线与历史趋势 |
+| 启动日志 | 分组归纳与时间线混排双视角排查视图，支持等级筛选、关键词检索与一键复制 |
+| 对比 | 选定两次运行执行关键节点差值与 `Bootloader 分段耗时差异 (B - A)` 对比 |
+| 设置 | 开关开机浮层（`disable_display`）、配置 `--replay` 参数、清理历史运行及编辑 `rules.conf` |
 
-## 更新与恢复
-
-**更新模块：** 在 KernelSU 管理器中直接安装新版 ZIP，或在支持 `updateJson` 的管理器中直接检查更新；满足热安装条件时无需重启设备即可更新工具与 WebUI 资产（新增早期底层特性后建议重启一次以验证实机开机采集）。
-
-**临时关闭屏幕显示：** 若不希望在开机时出现屏幕 HUD（仍保留后台采样与 WebUI 分析），可在 WebUI「设置」页切换开关，或执行：
+### 常用命令行（Root Shell）
 
 ```sh
-mkdir -p /data/adb/bootscope
-touch /data/adb/bootscope/disable_display
+bootscope summary latest                         # 输出最近一次开机的文本摘要
+bootscope inspect-json latest                    # 输出供分析/脚本消费的完整 JSON
+bootscope logs-json latest --level critical      # 筛选致命异常、模块错误与 init 失败日志
+bootscope replay latest --bl --pre-sf            # 在屏幕回放含 BL 与帧前阶段的全链路启动
+bootscope version                                # 查看包版本（-rN）与内嵌完整 Commit SHA
 ```
 
-删除该文件或重新打开开关即可恢复显示。
+## 环境兼容与安装
 
-**卸载模块：** 在管理器中点击卸载模块并重启后，`uninstall.sh` 会自动清理 `/metadata/vold/ksu/bootscope*` 注入文件与 `/data/adb/bootscope/` 运行数据。
+- **系统与架构**：`arm64-v8a`，Android 13+（API 33+）。
+- **Root 环境**：完整能力需要 **KernelSU / SukiSU-Ultra**（用于 `initrc` 早期拉起、管理器 WebUI 与条件免重启热更新）。Magisk / APatch 环境下仍可使用后台采集与 `late_native` 后期回退显示，但不支持 `late-fs` 早期浮层；样本亦可导出到电脑通过仓库内 Python 脚本离线分析。
+- **已实测平台**：小米（Qualcomm，Android 16，SukiSU-Ultra）；Google Pixel 7 Pro（Tensor，Android 17，KernelSU）。
 
-## 数据与配置存储位置
+### 安装与开关说明
 
-模块运行与持久化配置使用的设备端路径如下：
+1. 从 [Releases](https://github.com/Linoleic/BootScope/releases) 获取模块压缩包（或按 [BUILD.md](BUILD.md) 从源码构建）并在 KernelSU 管理器安装。
+2. 首次安装后重启一次以激活 `initrc/bootscope.rc`；后续若 `KSU_HAS_HOT_INSTALL=true` 且早期入口已激活，升级会自动请求免重启热安装。
+3. **关闭屏幕浮层但保留采集与 WebUI**：在 WebUI「设置」页关闭开关，或创建空文件 `/data/adb/bootscope/disable_display`。
+4. **自定义过滤/高亮/脱敏规则**：配置持久化保存在 `/data/adb/bootscope/rules.conf`（升级保留）；单次开机数据存放在 `/data/adb/bootscope/<boot_id>/`（权限 `0700`），KernelSU 早期副本同步于 `/metadata/vold/ksu/bootscope*`。卸载模块并重启后由 `uninstall.sh` 自动清理上述目录。
 
-| 类型 | 存储路径 | 说明 |
-| --- | --- | --- |
-| **单次运行采样目录** | `/data/adb/bootscope/<boot_id>/` | 保存 `early-trace.tsv`、`samples.txt`、`psi.tsv`、`proc.tsv`、Bootloader 日志与显示诊断状态（权限 `0700`） |
-| **自定义过滤与脱敏规则** | `/data/adb/bootscope/rules.conf` | 持久化的过滤/高亮/脱敏规则覆盖配置，模块升级时保留；WebUI 在线编辑也会写入此处 |
-| **显示开关标志文件** | `/data/adb/bootscope/disable_display` | 存在该文件时禁用开机屏幕浮层，不影响采集与 WebUI |
-| **早期注入二进制与状态同步** | `/metadata/vold/ksu/bootscope*` | KernelSU `initrc` 早期入口使用的原生二进制、规则副本与显示禁用标记 |
-| **当次开机早期内存轨迹** | `/dev/bootscope_early*` | `late-fs` 阶段写入 `/dev` 临时节点的轨迹日志与状态文件，随后在 `service.sh` 阶段归档至运行目录 |
+## 已知边界与排障
 
-## 常见问题（FAQ）
+- **未见早期 HUD 或显示为 `late_native` / `none`**：`bootscope early` 依赖运行时 `dlopen` 与 `SurfaceFlinger` 符号匹配，部分定制 ROM 可能存在私有符号差异；可检查 `/data/adb/bootscope/<boot_id>/display-status.txt` 与 `display-renderer.txt`。
+- **Bootloader 阶段展示不完整或显示 `N/A`**：取决于 OEM 内核是否向用户态保留 UEFI/KPI/`bootprof` 读取权限，不影响 Android 用户态启动剖析。
+- **反馈兼容性问题**：提交 Issue 时请附带机型、Android 版本、Root 框架版本，以及脱敏确认后的 `display-status.txt` 与 `display-renderer.txt`。
 
-**1. 开机时没有看到屏幕浮层怎么办？**
+## 许可与相关文档
 
-先确认设备为 KernelSU / SukiSU-Ultra，且安装后已重启过至少一次以激活 `initrc/bootscope.rc`；也可打开 WebUI 或检查运行时目录中的 `display-status.txt`，排查是否开启了 `disable_display` 或触发了 `SurfaceFlinger` 符号兼容限制。
+BootScope 源码基于 **[GNU General Public License v3.0](LICENSE)** 开源（不附带任何担保）；前端 WebUI 编译产物内包含按 MIT 协议分发的 [Preact](https://preactjs.com/)。本项目涉及早期启动渲染与 Root 权限操作，刷入前请自行评估设备兼容性并做好备份。
 
-**2. Bootloader 耗时或分段显示为 `N/A` 正常吗？**
-
-属于常见现象。不同芯片与厂商（高通 UEFI/KPI、`ro.boot.boottime*`、联发科 `bootprof`）暴露给内核或属性的 Bootloader 节点权限与格式各不相同，未读取到对应平台节点时会降级展示，不影响 Android 系统阶段的采集与分析。
-
-**3. 安装后会不会明显拖慢开机速度？**
-
-不会产生明显负担。实际开机期间 HUD 刷新率主动限制在约 3 FPS 且采用零 `fork` 采样，可在 WebUI 运行列表中直接核对每次开机的自身耗时（`self_cpu_ms`）与内存占用（`self_rss_kb`）。如仍希望零图形开销，关闭显示开关即可。
-
-**4. Magisk 或 APatch 能否使用？**
-
-后台采集、屏幕后期 `late_native` 显示（若动画尚未退出）与屏幕回放脚本均可运行，但约开机 2–4 秒介入的 `initrc` 早期浮层及原生模块 WebUI 管理器入口需依赖 KernelSU 环境；非 KernelSU 用户也可将样本导出至电脑配合离线脚本分析。
-
-**5. 在哪里反馈新机型适配或界面问题？**
-
-可在仓库 Issues 中附上机型、Android 版本、Root 框架版本，以及对应运行目录中的 `display-status.txt`、`display-renderer.txt`（请留意脱敏检查）。
-
-## 使用声明
-
-BootScope 主要在早期启动、原生渲染进程与 Root 权限上下文中工作。尽管模块不改动系统分区，并内置 `disable_display` 安全开关、权限隔离与脱敏机制，刷新模块前仍请评估设备兼容性并保留备份；若出现异常，可在管理器停用或移除模块后重启恢复。
-
-本项目源码按 **GNU General Public License v3.0** 许可分发，不附带担保（详见 [LICENSE](LICENSE)）；前端 WebUI 编译产物中包含按 **MIT 许可证** 分发的 [Preact](https://preactjs.com/)。
-
-## 相关文档
-
-- [更新日志](CHANGELOG.md)
-- [技术架构与开发者指南](docs/ARCHITECTURE.md)
-- [自行构建与发布说明（本地 / GitHub Actions）](BUILD.md)
+- [更新日志 (CHANGELOG)](CHANGELOG.md)
+- [架构设计与接口契约 (ARCHITECTURE)](docs/ARCHITECTURE.md)
+- [源码构建、测试与 CI 发布 (BUILD)](BUILD.md)
 - [GNU GPL v3.0 许可证](LICENSE)
