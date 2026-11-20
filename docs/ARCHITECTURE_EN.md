@@ -1,6 +1,6 @@
 # BootScope Architecture & Developer Guide
 
-[中文](ARCHITECTURE.md) | **English** | [Back to README](../README_EN.md)
+[中文](ARCHITECTURE.md) | **English** | [Building](../BUILD_EN.md) | [Back to README](../README_EN.md)
 
 This document explains BootScope's internal design, boot-stage lifecycle, runtime SurfaceFlinger ABI adaptation, on-device data layout, JSON/CLI contract, and build pipeline for developers and contributors.
 
@@ -119,6 +119,7 @@ WebUI invokes `/data/adb/modules/bootscope/bootscope` via [webui/src/bridge.ts](
 | `compare-json <a> <b>` | Milestone deltas plus `bl_deltas` bootloader stage diff (`B - A`) |
 | `summary <target>` / `prune --keep N` | Human-readable CLI summary and old run cleanup |
 | `config-get` / `config-set <key> <val>` / `rules-get` / `rules-set` | Read/write `disable_display` state and persistent `rules.conf` |
+| `version` (`--version`, `-V`) | Prints embedded package version (`-r<commit>`) and full Git revision |
 
 ### `psi_series` Merging & Smooth Spline Rendering
 - [core/json_api.cpp](../core/json_api.cpp) merges early `trace_metrics` rows with tail `psi_points` (skipping leading `avg10` moving-average distortion), deduplicates timestamps, and raises the series cap to `120`.

@@ -1,6 +1,6 @@
 # BootScope 架构与开发者指南
 
-**中文** | [English](ARCHITECTURE_EN.md) | [返回 README](../README.md)
+**中文** | [English](ARCHITECTURE_EN.md) | [构建说明](../BUILD.md) | [返回 README](../README.md)
 
 本文档面向希望理解底层实现、调试兼容性或参与二次开发的开发者，说明 BootScope 的总体架构、启动生命周期、ABI 适配机制、数据文件格式、JSON/CLI 契约与构建系统设计。
 
@@ -119,6 +119,7 @@ WebUI 通过 [webui/src/bridge.ts](../webui/src/bridge.ts) 中的 `window.ksu.ex
 | `compare-json <a> <b>` | 计算两次启动的阶段差值与 `bl_deltas`（Bootloader 分段差异 `B - A`） |
 | `summary <target>` / `prune --keep N` | 终端可读摘要与清理旧运行目录 |
 | `config-get` / `config-set <key> <val>` / `rules-get` / `rules-set` | 读写 `disable_display` 与持久化 `rules.conf` |
+| `version` (`--version`, `-V`) | 输出内嵌包版本号（含 `-r<commit数>`）与完整构建 Commit 哈希 |
 
 ### `psi_series` 合并与平滑渲染
 - 后端 [core/json_api.cpp](../core/json_api.cpp) 优先采用 `early-trace.tsv` 的早期密集 `METRIC` 样本（覆盖 ~2–4s 至动画退出），再补充 `psi.tsv` 尾部区间，自动剔除首条 `avg10` 滑动均值干扰并放宽上限至 `120` 点。
