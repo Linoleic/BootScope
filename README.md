@@ -59,7 +59,7 @@ bootscope version                                # 查看包版本（-rN）与�
 1. 从 [Releases](https://github.com/Linoleic/BootScope/releases) 获取模块压缩包（或按 [BUILD.md](BUILD.md) 从源码构建）并在 KernelSU 管理器安装。
 2. 首次安装后重启一次以激活 `initrc/bootscope.rc`；后续若 `KSU_HAS_HOT_INSTALL=true` 且早期入口已激活，升级会自动请求免重启热安装。
 3. **关闭屏幕浮层但保留采集与 WebUI**：在 WebUI「设置」页关闭开关，或创建空文件 `/data/adb/bootscope/disable_display`。
-4. **自定义过滤/高亮/脱敏规则**：配置持久化保存在 `/data/adb/bootscope/rules.conf`（升级保留）；单次开机数据存放在 `/data/adb/bootscope/<boot_id>/`（权限 `0700`），KernelSU 早期副本同步于 `/metadata/vold/ksu/bootscope*`。卸载模块并重启后由 `uninstall.sh` 自动清理上述目录。
+4. **路径与卸载清理**：`rules.conf` 与历史开机记录（`<boot_id>/`，权限 `0700`）均存放在 `/data/adb/bootscope/`；KernelSU 早期运行副本位于 `/metadata/vold/ksu/bootscope*`。卸载模块并重启后，`uninstall.sh` 会自动清理 `/metadata/vold/ksu/bootscope*` 注入文件；`/data/adb/bootscope/` 默认保留以便重装复用历史样本与规则，如需彻底清空可执行 `rm -rf /data/adb/bootscope`。
 
 ## 已知边界与排障
 

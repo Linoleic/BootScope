@@ -59,7 +59,7 @@ bootscope version                                # Show packaged -rN version and
 1. Download the module ZIP from [Releases](https://github.com/Linoleic/BootScope/releases) (or build from source via [BUILD_EN.md](BUILD_EN.md)) and flash it in KernelSU.
 2. Reboot once after initial installation to activate `initrc/bootscope.rc`. Later upgrades automatically request rebootless hot install when `KSU_HAS_HOT_INSTALL=true` and the early entry is active.
 3. **Disable Overlay While Keeping Profiling**: Toggle the switch in WebUI **Settings**, or create `/data/adb/bootscope/disable_display`.
-4. **Paths & Cleanup**: Custom rules persist in `/data/adb/bootscope/rules.conf`; per-boot data lives under `/data/adb/bootscope/<boot_id>/` (`0700`); early KernelSU runtime copies live under `/metadata/vold/ksu/bootscope*`. Removing the module in your manager runs `uninstall.sh` on reboot to clear these directories.
+4. **Paths & Cleanup**: Custom rules (`rules.conf`) and per-boot archives (`<boot_id>/`, `0700`) live under `/data/adb/bootscope/`, while early KernelSU runtime copies live under `/metadata/vold/ksu/bootscope*`. Removing the module runs `uninstall.sh` on reboot to clear `/metadata/vold/ksu/bootscope*`; `/data/adb/bootscope/` is preserved by default for reuse on reinstall and can be removed manually (`rm -rf /data/adb/bootscope`) if a full wipe is desired.
 
 ## Caveats & Diagnostics
 
