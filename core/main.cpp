@@ -18,6 +18,7 @@ void print_usage() {
             "  collect [--keep <N>] [--once] [--out <dir>]\n"
             "  list-json [--limit <N>]\n"
             "  inspect-json <latest|boot_id|dir>\n"
+            "  logs-json <latest|boot_id|dir> [--level <all|critical|merr|fatal|init_fail|error|stage|info>] [--tag <tag>] [--q <query>] [--limit <N>] [--order <group|time>]\n"
             "  compare-json <target_a> <target_b>\n"
             "  summary <latest|boot_id|dir>\n"
             "  prune --keep <N>\n"
@@ -95,6 +96,34 @@ int main(int argc, char** argv) {
     if (sub == "inspect-json") {
         std::string target = (argc >= 3) ? argv[2] : "latest";
         return cmd_inspect_json(target);
+    }
+
+    if (sub == "logs-json") {
+        std::string target = "latest";
+        std::string level = "all";
+        std::string tag;
+        std::string query;
+        std::string order = "group";
+        int limit = 200;
+        bool has_target = false;
+        for (int i = 2; i < argc; i++) {
+            const char* a = argv[i];
+            if (strcmp(a, "--level") == 0 && i + 1 < argc) {
+                level = argv[++i];
+            } else if (strcmp(a, "--tag") == 0 && i + 1 < argc) {
+                tag = argv[++i];
+            } else if (strcmp(a, "--q") == 0 && i + 1 < argc) {
+                query = argv[++i];
+            } else if (strcmp(a, "--limit") == 0 && i + 1 < argc) {
+                limit = atoi(argv[++i]);
+            } else if (strcmp(a, "--order") == 0 && i + 1 < argc) {
+                order = argv[++i];
+            } else if (a[0] != '-' && !has_target) {
+                target = a;
+                has_target = true;
+            }
+        }
+        return cmd_logs_json(target, level, tag, query, limit, order);
     }
 
     if (sub == "compare-json") {

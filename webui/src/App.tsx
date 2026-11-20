@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import {
   fetchInspect,
   fetchList,
@@ -9,21 +9,33 @@ import {
 import { BlCard } from './components/BlCard';
 import { CompareView } from './components/CompareView';
 import { GanttTimeline } from './components/GanttTimeline';
+import { LogsView } from './components/LogsView';
 import { ReplayBar } from './components/ReplayBar';
 import { SettingsView } from './components/SettingsView';
-import { fmtMs } from './format';
+import { copyTextToClipboard, fmtMs } from './format';
 import type {
   ConfigState,
   InspectResponse,
   ListResponse,
+  LogGroupKey,
   ReplaySpeed,
 } from './types';
 
-type Tab = 'overview' | 'compare' | 'settings';
+type Tab = 'overview' | 'logs' | 'compare' | 'settings';
+
+function groupClass(g?: LogGroupKey): string {
+  if (g === 'merr') return 'lvl-merr';
+  if (g === 'fatal') return 'lvl-fatal';
+  if (g === 'init_fail') return 'lvl-init';
+  if (g === 'stage') return 'lvl-stage';
+  if (g === 'info') return 'lvl-info';
+  return 'lvl-error';
+}
 
 export function App() {
   const [tab, setTab] = useState<Tab>('overview');
-  const [visited, setVisited] = useState<{ compare: boolean; settings: boolean }>({
+  const [visited, setVisited] = useState<{ logs: boolean; compare: boolean; settings: boolean }>({
+    logs: false,
     compare: false,
     settings: false,
   });
@@ -37,11 +49,34 @@ export function App() {
   const [replaying, setReplaying] = useState<boolean>(false);
   const [statusMsg, setStatusMsg] = useState<string>('');
   const [statusErr, setStatusErr] = useState<boolean>(false);
+  const [copiedIdx, setCopiedIdx] = useState<number>(-1);
+  const copyTimerRef = useRef<number | null>(null);
 
   const setStatus = (msg: string, err = false) => {
     setStatusMsg(msg);
     setStatusErr(err);
   };
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current != null) window.clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
+  async function handleCopyPreview(idx: number, e: { ts_ms: number; src: string; text: string }) {
+    if (window.getSelection()?.toString()) return;
+    const formatted = `[${(e.ts_ms / 1000).toFixed(2)}s] [${e.src}] ${e.text}`;
+    const ok = await copyTextToClipboard(formatted);
+    if (!ok) {
+      setStatus('复制失败，请长按手动选择文本', true);
+      return;
+    }
+    setCopiedIdx(idx);
+    if (copyTimerRef.current != null) window.clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = window.setTimeout(() => setCopiedIdx(-1), 750);
+    const preview = e.text.length > 42 ? `${e.text.slice(0, 42)}…` : e.text;
+    setStatus(`已复制日志: ${preview}`);
+  }
 
   function switchTab(next: Tab) {
     setTab(next);
@@ -122,6 +157,9 @@ export function App() {
       ?? inspectData.boot_events[inspectData.boot_events.length - 1]?.ms
       ?? (inspectData.metadata.finished_uptime ? Number(inspectData.metadata.finished_uptime) * 1000 : -1))
     : -1;
+  const lc = inspectData?.log_counts;
+  const hasCriticalAlert = ((lc?.merr ?? 0) + (lc?.fatal ?? 0)) > 0;
+  const errSummaryTotal = inspectData?.errors_total ?? inspectData?.errors.length ?? 0;
 
   return (
     <main class="shell">
@@ -148,13 +186,17 @@ export function App() {
 
       <nav class="tabs">
         <button type="button" class={`tab-btn ${tab === 'overview' ? 'active' : ''}`} onClick={() => switchTab('overview')}>
-          总览与时间轴
+          总览
+        </button>
+        <button type="button" class={`tab-btn ${tab === 'logs' ? 'active' : ''}`} onClick={() => switchTab('logs')}>
+          <span>启动日志</span>
+          {hasCriticalAlert && <span class="tab-dot" aria-hidden="true" />}
         </button>
         <button type="button" class={`tab-btn ${tab === 'compare' ? 'active' : ''}`} onClick={() => switchTab('compare')}>
           A/B 对比
         </button>
         <button type="button" class={`tab-btn ${tab === 'settings' ? 'active' : ''}`} onClick={() => switchTab('settings')}>
-          配置与规则
+          配置
         </button>
       </nav>
 
@@ -243,7 +285,7 @@ export function App() {
 
                 <article class="card">
                   <div class="card-head">
-                    <h2>Init 耗时服务与错误诊断</h2>
+                    <h2>Init 耗时服务与错误摘要</h2>
                   </div>
                   <div class="kv-scroll">
                     <div class="kv-scroll-inner mono">
@@ -257,22 +299,57 @@ export function App() {
                       ))}
                     </div>
                   </div>
-                  <h3>
-                    错误 / 异常日志 (
-                    {inspectData.errors_total != null && inspectData.errors_total > inspectData.errors.length
-                      ? `最近 ${inspectData.errors.length} / 共 ${inspectData.errors_total}`
-                      : inspectData.errors.length}
-                    )
-                  </h3>
+                  <h3>错误摘要 ({errSummaryTotal})</h3>
+                  {lc && (
+                    <div class="err-summary-grid mono">
+                      <button
+                        type="button"
+                        class={`err-chip lvl-merr ${lc.merr > 0 ? 'is-alert' : ''}`}
+                        onClick={() => switchTab('logs')}
+                      >
+                        <span class="err-chip-k">模块 M</span>
+                        <span class="err-chip-v">{lc.merr}</span>
+                      </button>
+                      <button
+                        type="button"
+                        class={`err-chip lvl-fatal ${lc.fatal > 0 ? 'is-alert' : ''}`}
+                        onClick={() => switchTab('logs')}
+                      >
+                        <span class="err-chip-k">致命 F</span>
+                        <span class="err-chip-v">{lc.fatal}</span>
+                      </button>
+                      <button
+                        type="button"
+                        class={`err-chip lvl-init ${lc.init_fail > 0 ? 'is-alert' : ''}`}
+                        onClick={() => switchTab('logs')}
+                      >
+                        <span class="err-chip-k">Init 失败</span>
+                        <span class="err-chip-v">{lc.init_fail}</span>
+                      </button>
+                      <button
+                        type="button"
+                        class="err-chip lvl-error"
+                        onClick={() => switchTab('logs')}
+                      >
+                        <span class="err-chip-k">错误 E</span>
+                        <span class="err-chip-v">{lc.error}</span>
+                      </button>
+                    </div>
+                  )}
                   {inspectData.errors.length === 0 ? (
                     <div class="kv-list mono">
                       <div class="kv-row"><span class="k">无错误记录</span><span class="v">OK</span></div>
                     </div>
                   ) : (
-                    <div class="log-scroll">
+                    <div class="log-scroll log-preview">
                       <div class="log-list mono">
                         {inspectData.errors.map((e, idx) => (
-                          <div key={idx} class="log-row">
+                          <div
+                            key={idx}
+                            class={`log-row ${groupClass(e.group)} ${copiedIdx === idx ? 'is-copied' : ''}`}
+                            title="点击复制完整日志"
+                            onClick={() => handleCopyPreview(idx, e)}
+                          >
                             <span class="log-ts">{(e.ts_ms / 1000).toFixed(2)}s</span>
                             <span class="log-src">{e.src}</span>
                             <span class="log-msg">{e.text}</span>
@@ -281,10 +358,25 @@ export function App() {
                       </div>
                     </div>
                   )}
+                  <button type="button" class="btn ghost full-width" onClick={() => switchTab('logs')}>
+                    进入启动日志分级分析 →
+                  </button>
                 </article>
               </section>
             </>
           )}
+        </div>
+      )}
+
+      {listData && visited.logs && (
+        <div class={`tab-pane ${tab === 'logs' ? '' : 'is-hidden'}`}>
+          <LogsView
+            runs={listData.runs}
+            selectedId={selectedId}
+            onSelectRun={handleSelectRun}
+            refreshSeq={refreshSeq}
+            onStatus={setStatus}
+          />
         </div>
       )}
 

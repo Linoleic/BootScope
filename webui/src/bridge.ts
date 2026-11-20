@@ -3,6 +3,9 @@ import type {
   ConfigState,
   InspectResponse,
   ListResponse,
+  LogLevelKey,
+  LogOrder,
+  LogsResponse,
   ReplaySpeed,
   RulesResponse,
 } from './types';
@@ -200,8 +203,51 @@ const MOCK_INSPECT: InspectResponse = {
     { ts_ms: 20000, cpu: 34, io: 8, mem: 0 },
   ],
   top_cpu: [{ comm: 'SYSTEM_SERVER', pct: 48.2 }],
-  errors: [],
+  log_counts: { merr: 0, fatal: 1, init_fail: 1, error: 2, stage: 6, info: 12, total: 22 },
+  errors_total: 4,
+  errors: [
+    { ts_ms: 9730, src: 'F', kind: 'ERR', group: 'fatal', text: 'libc: Fatal signal 6 (SIGABRT) in tid 123 (demo)' },
+    { ts_ms: 2150, src: 'E', kind: 'ERR', group: 'init_fail', text: "Command 'write /sys/demo 1' failed: Permission denied" },
+    { ts_ms: 14470, src: 'E', kind: 'ERR', group: 'error', text: 'SettingsState: invalid override flag demo' },
+  ],
 };
+
+const MOCK_LOGS: LogsResponse = {
+  ok: true,
+  boot_id: MOCK_LIST.runs[0].boot_id,
+  level: 'all',
+  tag: '',
+  query: '',
+  limit: 200,
+  order: 'group',
+  matched_total: 6,
+  counts: { merr: 0, fatal: 1, init_fail: 1, error: 2, stage: 1, info: 1, total: 6 },
+  stages: [
+    { ts_ms: 1420, src: 'K', text: 'ACT EARLY-INIT' },
+    { ts_ms: 6120, src: 'P', text: 'BOOT_PROGRESS_START' },
+  ],
+  top_tags: [
+    { tag: 'SettingsState', count: 2, fatal: 0 },
+    { tag: 'libc', count: 1, fatal: 1 },
+    { tag: 'init:cmd', count: 1, fatal: 0 },
+  ],
+  entries: [
+    { ts_ms: 9730, src: 'F', kind: 'ERR', group: 'fatal', tag: 'libc', text: 'libc: Fatal signal 6 (SIGABRT) in tid 123 (demo)' },
+    { ts_ms: 2150, src: 'E', kind: 'ERR', group: 'init_fail', tag: 'init:cmd', text: "Command 'write /sys/demo 1' failed: Permission denied" },
+    { ts_ms: 14470, src: 'E', kind: 'ERR', group: 'error', tag: 'SettingsState', text: 'SettingsState: invalid override flag demo' },
+    { ts_ms: 6120, src: 'P', kind: 'STAGE', group: 'stage', tag: 'P', text: 'BOOT_PROGRESS_START' },
+    { ts_ms: 1850, src: 'K', kind: 'INFO', group: 'info', tag: 'K', text: '+apexd-bootstrap' },
+  ],
+};
+
+const VALID_LEVELS = new Set<LogLevelKey>([
+  'all', 'critical', 'merr', 'fatal', 'init_fail', 'error', 'stage', 'info',
+]);
+
+function shQuote(raw: string): string {
+  const safe = raw.replace(/[\r\n\0]/g, ' ').trim();
+  return `'${safe.replace(/'/g, "'\\''")}'`;
+}
 
 const MOCK_COMPARE: CompareResponse = {
   ok: true,
@@ -243,6 +289,36 @@ export async function fetchCompare(aId: string, bId: string): Promise<CompareRes
   if (!hasKsuBridge()) return MOCK_COMPARE;
   if (!UUID_RE.test(aId) || !UUID_RE.test(bId)) throw new Error('invalid_boot_id');
   return execJson<CompareResponse>(`compare-json ${aId} ${bId}`);
+}
+
+export async function fetchLogs(opts: {
+  bootId: string;
+  level?: LogLevelKey;
+  tag?: string;
+  query?: string;
+  limit?: number;
+  order?: LogOrder;
+}): Promise<LogsResponse> {
+  const level: LogLevelKey = opts.level && VALID_LEVELS.has(opts.level) ? opts.level : 'all';
+  const order: LogOrder = opts.order === 'time' ? 'time' : 'group';
+  if (!hasKsuBridge()) {
+    const filtered = MOCK_LOGS.entries.filter((e) => {
+      if (level === 'critical') return e.group === 'merr' || e.group === 'fatal' || e.group === 'init_fail';
+      return level === 'all' || e.group === level;
+    });
+    const entries = order === 'time' ? [...filtered].sort((a, b) => a.ts_ms - b.ts_ms) : filtered;
+    return { ...MOCK_LOGS, level, order, matched_total: entries.length, entries };
+  }
+  if (!UUID_RE.test(opts.bootId)) throw new Error('invalid_boot_id');
+  const limit = Math.max(20, Math.min(2000, Math.round(opts.limit ?? 200)));
+  const args: string[] = ['logs-json', opts.bootId, '--limit', String(limit)];
+  if (level !== 'all') args.push('--level', level);
+  if (order === 'time') args.push('--order', 'time');
+  const tag = (opts.tag ?? '').trim();
+  if (tag) args.push('--tag', shQuote(tag));
+  const query = (opts.query ?? '').trim();
+  if (query) args.push('--q', shQuote(query));
+  return execJson<LogsResponse>(args.join(' '));
 }
 
 export async function updateConfig(

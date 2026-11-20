@@ -23,6 +23,7 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -230,6 +231,136 @@ int64_t count_trace_errors(const std::string& path) {
     return cnt;
 }
 
+enum class LogGroup { Merr, Fatal, InitFail, Error, Stage, Info };
+
+struct LogCounts {
+    size_t merr = 0;
+    size_t fatal = 0;
+    size_t init_fail = 0;
+    size_t error = 0;
+    size_t stage = 0;
+    size_t info = 0;
+    size_t errors_total() const { return merr + fatal + init_fail + error; }
+    size_t total() const { return errors_total() + stage + info; }
+};
+
+struct ClassifiedLog {
+    TailEntry entry;
+    LogGroup group = LogGroup::Info;
+    std::string tag;
+};
+
+const char* log_group_key(LogGroup g) {
+    switch (g) {
+        case LogGroup::Merr: return "merr";
+        case LogGroup::Fatal: return "fatal";
+        case LogGroup::InitFail: return "init_fail";
+        case LogGroup::Error: return "error";
+        case LogGroup::Stage: return "stage";
+        case LogGroup::Info: return "info";
+    }
+    return "info";
+}
+
+const char* tail_kind_str(TailKind k) {
+    switch (k) {
+        case TailKind::ModuleError: return "MERR";
+        case TailKind::Error: return "ERR";
+        case TailKind::Stage: return "STAGE";
+        case TailKind::Info: return "INFO";
+    }
+    return "INFO";
+}
+
+LogGroup classify_trace_entry(const TailEntry& e) {
+    if (e.kind == TailKind::ModuleError) return LogGroup::Merr;
+    if (e.kind == TailKind::Stage) return LogGroup::Stage;
+    if (e.kind == TailKind::Info) return LogGroup::Info;
+
+    if (e.source == "F"
+            || icontains(e.text, "FATAL")
+            || icontains(e.text, "Fatal signal")
+            || icontains(e.text, "SIGABRT")
+            || icontains(e.text, "SIGSEGV")
+            || icontains(e.text, "I/O error")
+            || icontains(e.text, "ext4-fs error")
+            || icontains(e.text, "f2fs-fs error")
+            || icontains(e.text, "panic")
+            || icontains(e.text, "avc: denied")) {
+        return LogGroup::Fatal;
+    }
+    if (e.text.rfind("Command '", 0) == 0
+            || e.text.rfind("CMD FAIL ", 0) == 0
+            || e.text.find(" RC=") != std::string::npos
+            || e.text.find(" SIG=") != std::string::npos) {
+        return LogGroup::InitFail;
+    }
+    return LogGroup::Error;
+}
+
+std::string extract_log_tag(const TailEntry& e, LogGroup g) {
+    if (g == LogGroup::InitFail) {
+        if (e.text.rfind("Command '", 0) == 0 || e.text.rfind("CMD FAIL ", 0) == 0) {
+            return "init:cmd";
+        }
+        return "init:svc";
+    }
+    size_t colon = e.text.find(':');
+    if (colon != std::string::npos && colon >= 1 && colon <= 48) {
+        std::string cand = trim_copy(e.text.substr(0, colon));
+        size_t spaces = 0;
+        bool bad = cand.empty();
+        for (char c : cand) {
+            if (c == '\'' || c == '"' || c == '=' || c == '/') {
+                bad = true;
+                break;
+            }
+            if (c == ' ') spaces++;
+        }
+        if (!bad && spaces <= 1) return cand;
+    }
+    return e.source.empty() ? std::string("sys") : e.source;
+}
+
+std::vector<TailEntry> collect_trace_entries(const RunSnapshotBundle& b) {
+    std::vector<TailEntry> out;
+    if (b.rd.has_trace && !b.rd.trace_tails.empty()) {
+        out.reserve(b.rd.trace_tails.size());
+        for (const auto& tt : b.rd.trace_tails) {
+            out.push_back({tt.ts_ms, 0, tt.source, "", tt.text, tt.kind});
+        }
+    } else {
+        out = b.tails;
+    }
+    return out;
+}
+
+std::vector<ClassifiedLog> classify_all_logs(const RunSnapshotBundle& b, LogCounts* counts) {
+    *counts = LogCounts{};
+    auto raw = collect_trace_entries(b);
+    std::vector<ClassifiedLog> out;
+    out.reserve(raw.size());
+    for (auto& te : raw) {
+        LogGroup g = classify_trace_entry(te);
+        switch (g) {
+            case LogGroup::Merr: counts->merr++; break;
+            case LogGroup::Fatal: counts->fatal++; break;
+            case LogGroup::InitFail: counts->init_fail++; break;
+            case LogGroup::Error: counts->error++; break;
+            case LogGroup::Stage: counts->stage++; break;
+            case LogGroup::Info: counts->info++; break;
+        }
+        std::string tag = extract_log_tag(te, g);
+        out.push_back({std::move(te), g, std::move(tag)});
+    }
+    return out;
+}
+
+void print_log_counts_json(const LogCounts& c) {
+    printf("{\"merr\":%zu,\"fatal\":%zu,\"init_fail\":%zu,\"error\":%zu,\"stage\":%zu,\"info\":%zu,\"total\":%zu}",
+           c.merr, c.fatal, c.init_fail, c.error, c.stage, c.info, c.total());
+}
+
 }  // namespace
 
 int cmd_list_json(int limit) {
@@ -432,26 +563,181 @@ int cmd_inspect_json(const std::string& target) {
     }
     printf("],");
 
-    std::vector<TailEntry> errs;
-    if (b.rd.has_trace && !b.rd.trace_tails.empty()) {
-        for (const auto& tt : b.rd.trace_tails) {
-            if (tt.kind == TailKind::Error || tt.kind == TailKind::ModuleError) {
-                errs.push_back({tt.ts_ms, 0, tt.source, "", tt.text, tt.kind});
+    LogCounts counts;
+    auto logs = classify_all_logs(b, &counts);
+    std::vector<size_t> buckets[4];
+    for (size_t i = 0; i < logs.size(); i++) {
+        int gi = (int)logs[i].group;
+        if (gi >= 0 && gi < 4) buckets[gi].push_back(i);
+    }
+    std::vector<size_t> preview;
+    std::unordered_set<std::string> seen_text;
+    for (int g = 0; g < 4 && preview.size() < 5; g++) {
+        const auto& bk = buckets[g];
+        std::vector<size_t> picked;
+        size_t need = 5 - preview.size();
+        for (size_t j = bk.size(); j > 0 && picked.size() < need; j--) {
+            size_t idx = bk[j - 1];
+            if (seen_text.insert(logs[idx].entry.text).second) {
+                picked.push_back(idx);
             }
         }
-    } else {
-        for (const auto& te : b.tails) {
-            if (te.kind == TailKind::Error || te.kind == TailKind::ModuleError) errs.push_back(te);
-        }
+        std::reverse(picked.begin(), picked.end());
+        preview.insert(preview.end(), picked.begin(), picked.end());
     }
-    printf("\"errors_total\":%zu,\"errors\":[", errs.size());
-    size_t err_start = errs.size() > 2000 ? (errs.size() - 2000) : 0;
-    for (size_t i = err_start; i < errs.size(); i++) {
-        if (i > err_start) putchar(',');
-        const char* kstr = (errs[i].kind == TailKind::ModuleError) ? "MERR" : "ERR";
-        printf("{\"ts_ms\":%lld,\"src\":\"%s\",\"kind\":\"%s\",\"text\":\"%s\"}",
-               (long long)errs[i].ts_ms, json_escape(errs[i].source).c_str(),
-               kstr, json_escape(errs[i].text).c_str());
+
+    printf("\"log_counts\":");
+    print_log_counts_json(counts);
+    printf(",\"errors_total\":%zu,\"errors\":[", counts.errors_total());
+    for (size_t i = 0; i < preview.size(); i++) {
+        if (i > 0) putchar(',');
+        const auto& cl = logs[preview[i]];
+        printf("{\"ts_ms\":%lld,\"src\":\"%s\",\"kind\":\"%s\",\"group\":\"%s\",\"text\":\"%s\"}",
+               (long long)cl.entry.ts_ms,
+               json_escape(cl.entry.source).c_str(),
+               tail_kind_str(cl.entry.kind),
+               log_group_key(cl.group),
+               json_escape(cl.entry.text).c_str());
+    }
+    printf("]}\n");
+    return 0;
+}
+
+int cmd_logs_json(
+        const std::string& target, const std::string& level_filter,
+        const std::string& tag_filter, const std::string& query_filter, int limit,
+        const std::string& order_mode) {
+    RuleSet rules;
+    load_rules(&rules);
+    RunSnapshotBundle b;
+    if (!load_bundle(target, rules, &b)) {
+        printf("{\"ok\":false,\"error\":\"run_not_found\"}\n");
+        return 1;
+    }
+
+    std::string level = lower_copy(trim_copy(level_filter));
+    if (level != "critical" && level != "merr" && level != "fatal" && level != "init_fail"
+            && level != "error" && level != "stage" && level != "info") {
+        level = "all";
+    }
+    std::string order = (lower_copy(trim_copy(order_mode)) == "time") ? "time" : "group";
+    if (limit <= 0) limit = 200;
+    limit = std::min(2000, std::max(20, limit));
+
+    LogCounts counts;
+    auto logs = classify_all_logs(b, &counts);
+
+    std::vector<size_t> stage_indices;
+    for (size_t i = 0; i < logs.size(); i++) {
+        if (logs[i].group == LogGroup::Stage) stage_indices.push_back(i);
+    }
+    std::sort(stage_indices.begin(), stage_indices.end(), [&](size_t x, size_t y) {
+        if (logs[x].entry.ts_ms != logs[y].entry.ts_ms) {
+            return logs[x].entry.ts_ms < logs[y].entry.ts_ms;
+        }
+        return x < y;
+    });
+
+    struct TagStat { std::string display; size_t count = 0; size_t fatal = 0; };
+    std::unordered_map<std::string, TagStat> tag_map;
+    for (const auto& item : logs) {
+        if (item.group == LogGroup::Stage || item.group == LogGroup::Info) continue;
+        std::string key = lower_copy(item.tag);
+        auto& st = tag_map[key];
+        if (st.display.empty()) st.display = item.tag;
+        st.count++;
+        if (item.group == LogGroup::Fatal || item.group == LogGroup::Merr) st.fatal++;
+    }
+    std::vector<TagStat> top_tags;
+    top_tags.reserve(tag_map.size());
+    for (const auto& kv : tag_map) top_tags.push_back(kv.second);
+    std::sort(top_tags.begin(), top_tags.end(), [](const TagStat& x, const TagStat& y) {
+        if (x.count != y.count) return x.count > y.count;
+        if (x.fatal != y.fatal) return x.fatal > y.fatal;
+        return x.display < y.display;
+    });
+
+    std::vector<size_t> matched;
+    matched.reserve(logs.size());
+    for (size_t i = 0; i < logs.size(); i++) {
+        const auto& item = logs[i];
+        if (level == "critical") {
+            if (item.group != LogGroup::Merr && item.group != LogGroup::Fatal
+                    && item.group != LogGroup::InitFail) {
+                continue;
+            }
+        } else if (level != "all" && level != log_group_key(item.group)) {
+            continue;
+        }
+        if (!tag_filter.empty() && !iequals(item.tag, tag_filter)) continue;
+        if (!query_filter.empty()
+                && !icontains(item.entry.text, query_filter.c_str())
+                && !icontains(item.tag, query_filter.c_str())) {
+            continue;
+        }
+        matched.push_back(i);
+    }
+
+    std::vector<size_t> selected;
+    if (level == "all" && tag_filter.empty() && query_filter.empty()) {
+        std::vector<size_t> bk[6];
+        for (size_t idx : matched) bk[(int)logs[idx].group].push_back(idx);
+        const size_t caps[6] = {
+            200, 200, 200, (size_t)limit, 200, std::min<size_t>((size_t)limit, 150)
+        };
+        for (int g = 0; g < 6; g++) {
+            size_t start = bk[g].size() > caps[g] ? (bk[g].size() - caps[g]) : 0;
+            for (size_t j = start; j < bk[g].size(); j++) selected.push_back(bk[g][j]);
+        }
+    } else {
+        size_t start = matched.size() > (size_t)limit ? (matched.size() - (size_t)limit) : 0;
+        for (size_t j = start; j < matched.size(); j++) selected.push_back(matched[j]);
+    }
+
+    if (order == "time") {
+        std::sort(selected.begin(), selected.end(), [&](size_t x, size_t y) {
+            if (logs[x].entry.ts_ms != logs[y].entry.ts_ms) {
+                return logs[x].entry.ts_ms < logs[y].entry.ts_ms;
+            }
+            return x < y;
+        });
+    }
+
+    printf("{\"ok\":true,\"boot_id\":\"%s\",\"level\":\"%s\",\"tag\":\"%s\",\"query\":\"%s\","
+           "\"limit\":%d,\"order\":\"%s\",\"matched_total\":%zu,\"counts\":",
+           json_escape(b.boot_id).c_str(),
+           json_escape(level).c_str(),
+           json_escape(tag_filter).c_str(),
+           json_escape(query_filter).c_str(),
+           limit,
+           json_escape(order).c_str(),
+           matched.size());
+    print_log_counts_json(counts);
+
+    printf(",\"stages\":[");
+    for (size_t i = 0; i < stage_indices.size() && i < 200; i++) {
+        if (i > 0) putchar(',');
+        const auto& st = logs[stage_indices[i]].entry;
+        printf("{\"ts_ms\":%lld,\"src\":\"%s\",\"text\":\"%s\"}",
+               (long long)st.ts_ms, json_escape(st.source).c_str(), json_escape(st.text).c_str());
+    }
+    printf("],\"top_tags\":[");
+    for (size_t i = 0; i < top_tags.size() && i < 15; i++) {
+        if (i > 0) putchar(',');
+        printf("{\"tag\":\"%s\",\"count\":%zu,\"fatal\":%zu}",
+               json_escape(top_tags[i].display).c_str(), top_tags[i].count, top_tags[i].fatal);
+    }
+    printf("],\"entries\":[");
+    for (size_t i = 0; i < selected.size(); i++) {
+        if (i > 0) putchar(',');
+        const auto& item = logs[selected[i]];
+        printf("{\"ts_ms\":%lld,\"src\":\"%s\",\"kind\":\"%s\",\"group\":\"%s\",\"tag\":\"%s\",\"text\":\"%s\"}",
+               (long long)item.entry.ts_ms,
+               json_escape(item.entry.source).c_str(),
+               tail_kind_str(item.entry.kind),
+               log_group_key(item.group),
+               json_escape(item.tag).c_str(),
+               json_escape(item.entry.text).c_str());
     }
     printf("]}\n");
     return 0;

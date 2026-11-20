@@ -400,7 +400,7 @@ class PackagingAndModuleTests(unittest.TestCase):
             'cmd_inspect_json', 'cmd_compare_json', 'cmd_rules_set_json',
             'BOOTSCOPE / BOOTLOADER', 'ro.surface_flinger.primary_display_orientation', 'rot_quad',
             'sanitize_trace_text', 'errors_total', 'getrusage', 'self_cpu_ms', 'self_rss_kb',
-            'bootscope_early',
+            'bootscope_early', 'cmd_logs_json', 'logs-json', 'log_counts', '--order', '"critical"',
         ):
             self.assertIn(marker, core_cpp)
         self.assertFalse((ROOT / 'display').exists())
@@ -410,6 +410,7 @@ class PackagingAndModuleTests(unittest.TestCase):
 
         web_pkg = (ROOT / 'webui' / 'package.json').read_text(encoding='utf-8')
         web_bridge = (ROOT / 'webui' / 'src' / 'bridge.ts').read_text(encoding='utf-8')
+        web_format = (ROOT / 'webui' / 'src' / 'format.ts').read_text(encoding='utf-8')
         web_css = (ROOT / 'webui' / 'src' / 'styles.css').read_text(encoding='utf-8')
         web_app = (ROOT / 'webui' / 'src' / 'App.tsx').read_text(encoding='utf-8')
         self.assertIn('"preact"', web_pkg)
@@ -420,6 +421,8 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('list-json', web_bridge)
         self.assertIn('inspect-json', web_bridge)
         self.assertIn('compare-json', web_bridge)
+        self.assertIn('logs-json', web_bridge)
+        self.assertIn('shQuote', web_bridge)
         self.assertIn('grid-template-columns: minmax(0, 1fr)', web_css)
         self.assertNotIn('grid-template-columns: 1fr;', web_css)
         for css_tok in (
@@ -434,10 +437,19 @@ class PackagingAndModuleTests(unittest.TestCase):
         web_run_select = (ROOT / 'webui' / 'src' / 'components' / 'RunSelect.tsx').read_text(encoding='utf-8')
         web_replay_bar = (ROOT / 'webui' / 'src' / 'components' / 'ReplayBar.tsx').read_text(encoding='utf-8')
         web_compare = (ROOT / 'webui' / 'src' / 'components' / 'CompareView.tsx').read_text(encoding='utf-8')
+        web_logs = (ROOT / 'webui' / 'src' / 'components' / 'LogsView.tsx').read_text(encoding='utf-8')
         self.assertIn('role="combobox"', web_run_select)
         self.assertIn('role="listbox"', web_run_select)
         self.assertNotIn('<select', web_replay_bar)
         self.assertNotIn('<select', web_compare)
+        self.assertIn('log-group-head', web_logs)
+        self.assertIn('log-scroll', web_logs)
+        self.assertNotIn('左右滑动', web_logs)
+        self.assertIn('copyTextToClipboard', web_format)
+        self.assertIn('is-copied', web_logs)
+        self.assertIn('is-copied', web_css)
+        self.assertIn('timeline-stage-divider', web_logs)
+        self.assertIn('时间线', web_logs)
 
     def test_build_module_ndk_resolution(self):
         with tempfile.TemporaryDirectory() as tmp:

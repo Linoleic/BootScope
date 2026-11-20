@@ -442,7 +442,7 @@ static void process_kmsg_record(EventState* st, const char* rec) {
     }
 
     if (matches_module_key(st->rules, msg) && (icontains(msg, "selinux") || icontains(msg, "avc:"))) {
-        push_tail(st, ts_ms, "M", TailKind::ModuleError, "ERR SELINUX DENY BOOTSCOPE", "MOD:SELINUX");
+        push_tail(st, ts_ms, "M", TailKind::ModuleError, "ERR SELINUX DENY BOOTSCOPE", "MOD:SELINUX", msg);
         return;
     }
     const char* kpi_p = strstr(msg.c_str(), "KPI: ");

@@ -101,10 +101,61 @@ export interface TopCpuProc {
   pct: number;
 }
 
+export type LogLevelKey = 'all' | 'critical' | 'merr' | 'fatal' | 'init_fail' | 'error' | 'stage' | 'info';
+export type LogGroupKey = Exclude<LogLevelKey, 'all' | 'critical'>;
+export type LogOrder = 'group' | 'time';
+
+export interface LogCounts {
+  merr: number;
+  fatal: number;
+  init_fail: number;
+  error: number;
+  stage: number;
+  info: number;
+  total: number;
+}
+
+export interface LogTagStat {
+  tag: string;
+  count: number;
+  fatal: number;
+}
+
+export interface LogStageAnchor {
+  ts_ms: number;
+  src: string;
+  text: string;
+}
+
+export interface LogEntry {
+  ts_ms: number;
+  src: string;
+  kind: string;
+  group: LogGroupKey;
+  tag: string;
+  text: string;
+}
+
+export interface LogsResponse {
+  ok: boolean;
+  boot_id: string;
+  level: LogLevelKey;
+  tag: string;
+  query: string;
+  limit: number;
+  order?: LogOrder;
+  matched_total: number;
+  counts: LogCounts;
+  stages?: LogStageAnchor[];
+  top_tags: LogTagStat[];
+  entries: LogEntry[];
+}
+
 export interface TraceError {
   ts_ms: number;
   src: string;
   kind: string;
+  group?: LogGroupKey;
   text: string;
 }
 
@@ -131,6 +182,7 @@ export interface InspectResponse {
   boot_events: BootEvent[];
   psi_series: PsiPoint[];
   top_cpu: TopCpuProc[];
+  log_counts?: LogCounts;
   errors_total?: number;
   errors: TraceError[];
 }
