@@ -1,5 +1,6 @@
 #pragma once
 
+#include "early/bootloader.h"
 #include "early/sys_metrics.h"
 
 #include <stdint.h>
@@ -13,6 +14,11 @@ bool trace_is_open();
 
 void trace_life(int64_t ts_ms, const char* event, const std::string& detail = "");
 void trace_bl(int64_t ts_ms, const std::string& bl_line, int64_t total_ms);
+void trace_bl_meta(
+    const std::string& source, int64_t timeline_ms, int64_t wait_ms, const std::string& meta_line);
+void trace_bl_stage(const BlStage& st);
+void trace_bl_event(const BlEvent& ev);
+void trace_bl_profile(int64_t ts_ms, const BootloaderProfile& profile);
 void trace_phase(
     int64_t ts_ms, int idx, int state, int64_t start_ms, int64_t end_ms,
     const std::string& detail);

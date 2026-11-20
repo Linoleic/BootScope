@@ -195,6 +195,9 @@ def main() -> None:
         text_entries.extend([
             ('display.sh', 0o100755),
             ('rules.conf', 0o100644),
+            ('webroot/index.html', 0o100644),
+            ('webroot/style.css', 0o100644),
+            ('webroot/app.js', 0o100644),
         ])
         if early_path is not None:
             text_entries.extend([

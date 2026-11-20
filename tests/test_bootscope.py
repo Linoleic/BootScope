@@ -153,6 +153,58 @@ class BootScopeParsingTests(unittest.TestCase):
         self.assertEqual(qcom['QCOM_BL_KL_MS'], 1000)
         self.assertEqual(qcom['QCOM_MPM_FREQ_HZ'], 32768)
 
+    def test_qcom_kpi_delta_uefilog_and_mtk_bootprof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kpi = tmp_path / 'bootloader-kpi.tsv'
+            kpi.write_text(
+                'bl_start\t98943\n'
+                'bl_end\t154935\n'
+                'bl_load_kernel\t1796\n'
+                'kernel_mpm\t233685\n'
+                'mpm_freq\t32768\n',
+                encoding='utf-8',
+            )
+            qcom = analyze_probe.read_qcom_kpi(kpi)
+            self.assertEqual(qcom['QCOM_BL_KL_MS'], 55)
+            self.assertEqual(qcom['QCOM_KERNEL_HANDOFF_MS'], 2403)
+            self.assertEqual(qcom['QCOM_PRE_BL_MS'], 3020)
+
+            uefi = tmp_path / 'bootloader-uefi.txt'
+            uefi.write_text(
+                'APBL Exit: 140186\n'
+                'B -    150030 - SBL1, Start\n'
+                'B -   1476749 - SBL1, End\n'
+                'D -   1329464 - SBL1, Delta\n'
+                'UEFI Start     [ 1744]\n'
+                'UEFI Total : 1264 ms\n'
+                'Load Image boot_a total time: 55 ms\n'
+                'Apply Overlay total time: 300 ms\n'
+                'Update Device Tree total time: 46 ms\n'
+                'Shutting Down UEFI Boot Services: 4412 ms\n',
+                encoding='utf-8',
+            )
+            uefi_bl = analyze_probe.read_uefilog_bl(uefi)
+            self.assertEqual(uefi_bl['UEFI_PBL_MS'], 140)
+            self.assertEqual(uefi_bl['UEFI_SBL1_MS'], 1329)
+            self.assertEqual(uefi_bl['UEFI_DXE_MS'], 1264)
+            self.assertEqual(uefi_bl['UEFI_ABL_MS'], 1404)
+            self.assertEqual(uefi_bl['UEFI_KL_BOOT_MS'], 55)
+            self.assertEqual(uefi_bl['UEFI_OVL_MS'], 300)
+            self.assertEqual(uefi_bl['UEFI_DT_MS'], 46)
+            self.assertEqual(uefi_bl['UEFI_TOTAL_MS'], 4412)
+
+            bp = tmp_path / 'bootloader-bootprof.txt'
+            bp.write_text(
+                'PL Boot Time : 412\n'
+                'LK Boot Time : 980\n',
+                encoding='utf-8',
+            )
+            mtk_bl = analyze_probe.read_mtk_bootprof(bp)
+            self.assertEqual(mtk_bl['MTK_PL_MS'], 412)
+            self.assertEqual(mtk_bl['MTK_LK_MS'], 980)
+            self.assertEqual(mtk_bl['MTK_BL_TOTAL_MS'], 1392)
+
         with tempfile.TemporaryDirectory() as tmp:
             tsv = Path(tmp) / 'psi.tsv'
             tsv.write_text(
@@ -461,6 +513,28 @@ class PackagingAndModuleTests(unittest.TestCase):
             for name in ('action.sh', 'probe.sh', 'service.sh'):
                 self.assertEqual(archive.getinfo(name).external_attr >> 16, 0o100755)
                 self.assertNotIn(b'\r\n', archive.read(name))
+
+    def test_bl_replay_and_webroot_assets(self):
+        bootloader_cpp = (ROOT / 'display' / 'early' / 'bootloader.cpp').read_text(encoding='utf-8')
+        early_main_cpp = (ROOT / 'display' / 'bootscope_early.cpp').read_text(encoding='utf-8')
+        action_sh = (ROOT / 'module' / 'action.sh').read_text(encoding='utf-8')
+        build_py = (ROOT / 'build_module.py').read_text(encoding='utf-8')
+        web_html = (ROOT / 'module' / 'webroot' / 'index.html').read_text(encoding='utf-8')
+        web_js = (ROOT / 'module' / 'webroot' / 'app.js').read_text(encoding='utf-8')
+        web_css = (ROOT / 'module' / 'webroot' / 'style.css').read_text(encoding='utf-8')
+
+        self.assertIn('parse_qcom_uefilog_file', bootloader_cpp)
+        self.assertIn('parse_boottime_props', bootloader_cpp)
+        self.assertIn('parse_mtk_bootprof_file', bootloader_cpp)
+        self.assertIn('--bl', early_main_cpp)
+        self.assertIn('BOOTSCOPE / BOOTLOADER', early_main_cpp)
+        self.assertIn('--bl', action_sh)
+        self.assertIn('webroot/index.html', build_py)
+        self.assertIn('webroot/app.js', build_py)
+        self.assertIn('webroot/style.css', build_py)
+        self.assertIn('Bootloader', web_html)
+        self.assertIn('window.ksu', web_js)
+        self.assertIn('--window-inset-top', web_css)
 
 
 if __name__ == '__main__':

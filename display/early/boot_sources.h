@@ -1,5 +1,6 @@
 #pragma once
 
+#include "early/bootloader.h"
 #include "early/rules.h"
 
 #include <stdint.h>
@@ -52,25 +53,13 @@ struct ActiveService {
     int64_t start_ms = 0;
 };
 
-struct QcomKpi {
-    bool has_start = false;
-    bool has_end = false;
-    bool has_load = false;
-    bool has_kernel = false;
-    bool has_freq = false;
-    uint64_t bl_start = 0;
-    uint64_t bl_end = 0;
-    uint64_t bl_load_kernel = 0;
-    uint64_t kernel_mpm = 0;
-    uint64_t mpm_freq = 0;
-};
-
 struct EventState {
     std::mutex mu;
     RuleSet rules;
     StageInfo framework_stage;
     PhaseNode phases[6];
     QcomKpi qcom_kpi;
+    BootloaderProfile bl_profile;
     std::vector<ActiveService> active_svcs;
     std::string max_init_svc;
     int64_t max_init_dur_ms = 0;
@@ -101,7 +90,7 @@ void* event_reader_thread(void* arg);
 
 std::string build_bootloader_line();
 std::string short_init_action(const std::string& act);
-void init_phases(EventState* st, const std::string& bl_detail);
+void init_phases(EventState* st, const BootloaderProfile& bl_profile);
 std::string format_phase_row(const PhaseNode& n, int64_t now_ms, const RuleSet& rules);
 std::string format_tail_row(const TailEntry& e);
 

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>BootScope</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark"></div>
+        <div>
+          <h1>BOOTSCOPE</h1>
+          <p id="deviceBadge" class="sub mono">正在检测设备环境...</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="refreshBtn" class="btn ghost" type="button">刷新</button>
+      </div>
+    </header>
+
+    <div id="bridgeBanner" class="banner hidden">
+      未检测到 KernelSU / APatch `window.ksu` 桥接接口，请在管理器 WebUI 中打开以读取真实设备数据。
+    </div>
+
+    <section class="card control-card">
+      <div class="card-head">
+        <h2>启动记录与控制</h2>
+        <span id="runStatsBadge" class="pill mono">- 条记录</span>
+      </div>
+
+      <div class="run-picker">
+        <label for="runSelect" class="field-label">选择开机记录（按时间倒序）</label>
+        <div class="picker-row">
+          <select id="runSelect" class="select mono"></select>
+          <button id="pruneBtn" class="btn danger-soft" type="button" title="清理更早记录，仅保留最近 10 次">保留最近10次</button>
+        </div>
+      </div>
+
+      <div class="toggle-grid">
+        <label class="switch-row">
+          <div>
+            <div class="switch-title">开机屏幕实时显示</div>
+            <div class="switch-sub">下一次重启时是否渲染开机浮层面板</div>
+          </div>
+          <input id="bootDisplayToggle" type="checkbox" checked>
+        </label>
+
+        <div class="replay-box">
+          <div class="replay-opts">
+            <label class="check-chip"><input id="optBl" type="checkbox" checked><span>含 BL 阶段</span></label>
+            <label class="check-chip"><input id="optPreSf" type="checkbox" checked><span>含帧前阶段</span></label>
+          </div>
+          <div class="speed-group" role="group" aria-label="回放倍速">
+            <button class="speed-btn" data-speed="0.5" type="button">0.5x</button>
+            <button class="speed-btn" data-speed="1" type="button">1x</button>
+            <button class="speed-btn active" data-speed="2" type="button">2x</button>
+            <button class="speed-btn" data-speed="4" type="button">4x</button>
+          </div>
+          <button id="replayBtn" class="btn primary" type="button">屏幕叠加回放</button>
+        </div>
+      </div>
+      <p id="actionStatus" class="status-line mono"></p>
+    </section>
+
+    <section class="summary-grid" id="summaryCards">
+      <article class="stat-card">
+        <div class="stat-k">硬件 BL 耗时</div>
+        <div id="statBl" class="stat-v mono">--</div>
+        <div id="statBlSub" class="stat-s mono">-</div>
+      </article>
+      <article class="stat-card">
+        <div class="stat-k">早期浮层首帧</div>
+        <div id="statSf" class="stat-v mono">--</div>
+        <div id="statSfSub" class="stat-s mono">-</div>
+      </article>
+      <article class="stat-card">
+        <div class="stat-k">系统启动完成</div>
+        <div id="statDone" class="stat-v mono">--</div>
+        <div id="statDoneSub" class="stat-s mono">-</div>
+      </article>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Bootloader 分段详情</h2>
+        <span id="blSourceBadge" class="pill mono">--</span>
+      </div>
+      <div id="blMetaLine" class="meta-strip mono"></div>
+      <div id="blBar" class="bl-bar"></div>
+      <div id="blLegend" class="bl-legend mono"></div>
+      <div id="blTableWrap" class="table-wrap"></div>
+    </section>
+
+    <section class="two-col">
+      <article class="card">
+        <div class="card-head">
+          <h2>关键路径与框架里程碑</h2>
+          <span id="phaseBadge" class="pill mono">CRITICAL PATH</span>
+        </div>
+        <div id="phaseList" class="kv-list mono"></div>
+        <h3 class="sub-head">Framework 事件 (ms)</h3>
+        <div id="bootEventsList" class="kv-list mono"></div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h2>Init 阶段耗时 Top 服务</h2>
+          <span class="pill mono">DMESG</span>
+        </div>
+        <div id="initTopList" class="kv-list mono"></div>
+        <h3 class="sub-head">异常 / 错误 / 状态</h3>
+        <div id="diagList" class="kv-list mono"></div>
+      </article>
+    </section>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

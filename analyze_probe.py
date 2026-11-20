@@ -147,15 +147,141 @@ def read_qcom_kpi(path):
     bl_start = raw.get('bl_start')
     bl_end = raw.get('bl_end')
     bl_load = raw.get('bl_load_kernel')
+    kernel_mpm = raw.get('kernel_mpm')
     if freq > 0 and bl_start is not None and bl_end is not None and bl_end >= bl_start:
+        if bl_start > 0:
+            out['QCOM_PRE_BL_MS'] = round(bl_start * 1000.0 / freq)
         out['QCOM_BL_TOTAL_MS'] = round((bl_end - bl_start) * 1000.0 / freq)
         if bl_load is not None and bl_start <= bl_load <= bl_end:
             out['QCOM_BL_PRE_MS'] = round((bl_load - bl_start) * 1000.0 / freq)
             out['QCOM_BL_KL_MS'] = round((bl_end - bl_load) * 1000.0 / freq)
+        elif bl_load is not None and 0 < bl_load <= (bl_end - bl_start):
+            out['QCOM_BL_KL_MS'] = round(bl_load * 1000.0 / freq)
+            out['QCOM_BL_PRE_MS'] = round((bl_end - bl_start - bl_load) * 1000.0 / freq)
+        if kernel_mpm is not None and kernel_mpm > bl_end:
+            out['QCOM_KERNEL_HANDOFF_MS'] = round((kernel_mpm - bl_end) * 1000.0 / freq)
         out['QCOM_MPM_FREQ_HZ'] = freq
     else:
         for k, v in raw.items():
             out[f'qcom_{k}'] = v
+    return out
+
+
+def read_uefilog_bl(path):
+    """Parse sanitized or raw Qualcomm UefiLog0.txt into stage/image durations in ms."""
+    if not path.is_file():
+        return {}
+    text = path.read_bytes()[:131072].replace(b'\x00', b'\n').decode('utf-8', errors='replace')
+    apbl_exit_us = None
+    sbl1_start_us = None
+    sbl1_end_us = None
+    sbl1_delta_us = None
+    uefi_start_ms = None
+    uefi_total_ms = None
+    kl_boot_ms = None
+    ovl_ms = None
+    dt_ms = None
+    ebs_ms = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = re.match(r'^APBL Exit:\s*(\d+)', line)
+        if m:
+            apbl_exit_us = int(m.group(1))
+            continue
+        m = re.match(r'^B\s*-\s*(\d+)\s*-\s*(.+)$', line)
+        if m:
+            us = int(m.group(1))
+            msg = m.group(2)
+            if 'SBL1, Start' in msg:
+                sbl1_start_us = us
+            elif 'SBL1, End' in msg:
+                sbl1_end_us = us
+            continue
+        m = re.match(r'^D\s*-\s*(\d+)\s*-\s*SBL1, Delta', line)
+        if m:
+            sbl1_delta_us = int(m.group(1))
+            continue
+        m = re.search(r'^UEFI Start\s*\[\s*(\d+)\]', line)
+        if m:
+            uefi_start_ms = int(m.group(1))
+            continue
+        m = re.match(r'^UEFI Total\s*:\s*(\d+)\s*ms', line)
+        if m:
+            uefi_total_ms = int(m.group(1))
+            continue
+        m = re.match(r'^Load Image boot(?:_[ab])?\s+total time:\s*(\d+)\s*ms', line)
+        if m:
+            kl_boot_ms = int(m.group(1))
+            continue
+        m = re.match(r'^Apply Overlay total time:\s*(\d+)\s*ms', line)
+        if m:
+            ovl_ms = int(m.group(1))
+            continue
+        m = re.match(r'^Update Device Tree total time:\s*(\d+)\s*ms', line)
+        if m:
+            dt_ms = int(m.group(1))
+            continue
+        m = re.match(r'^(?:Shutting Down UEFI Boot Services:|Start EBS\s*\[)\s*(\d+)', line)
+        if m:
+            ebs_ms = int(m.group(1))
+
+    out = {}
+    if apbl_exit_us is not None:
+        out['UEFI_PBL_MS'] = round(apbl_exit_us / 1000.0)
+    if sbl1_delta_us is not None:
+        out['UEFI_SBL1_MS'] = round(sbl1_delta_us / 1000.0)
+    elif sbl1_start_us is not None and sbl1_end_us is not None and sbl1_end_us >= sbl1_start_us:
+        out['UEFI_SBL1_MS'] = round((sbl1_end_us - sbl1_start_us) / 1000.0)
+    if uefi_total_ms is not None:
+        out['UEFI_DXE_MS'] = uefi_total_ms
+    if ebs_ms is not None and uefi_start_ms is not None and uefi_total_ms is not None:
+        abl_start = uefi_start_ms + uefi_total_ms
+        if ebs_ms >= abl_start:
+            out['UEFI_ABL_MS'] = ebs_ms - abl_start
+    if kl_boot_ms is not None:
+        out['UEFI_KL_BOOT_MS'] = kl_boot_ms
+    if ovl_ms is not None:
+        out['UEFI_OVL_MS'] = ovl_ms
+    if dt_ms is not None:
+        out['UEFI_DT_MS'] = dt_ms
+    if ebs_ms is not None:
+        out['UEFI_TOTAL_MS'] = ebs_ms
+    return out
+
+
+def read_mtk_bootprof(path):
+    """Parse MediaTek /proc/bootprof bootloader lines (PL / LK) in ms."""
+    if not path.is_file():
+        return {}
+    pl_ms = None
+    lk_ms = None
+    for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+        s = line.strip()
+        m = re.search(r'PL Boot Time\s*:\s*(\d+)', s)
+        if m:
+            pl_ms = int(m.group(1))
+            continue
+        m = re.search(r'LK Boot Time\s*:\s*(\d+)', s)
+        if m:
+            lk_ms = int(m.group(1))
+            continue
+        if pl_ms is None and 'preloader' in s.lower():
+            m = re.match(r'^(\d+)\b', s)
+            if m:
+                pl_ms = int(m.group(1))
+        elif lk_ms is None and ('lk boot' in s.lower() or 'little kernel' in s.lower()):
+            m = re.match(r'^(\d+)\b', s)
+            if m:
+                lk_ms = int(m.group(1))
+    out = {}
+    if pl_ms is not None:
+        out['MTK_PL_MS'] = pl_ms
+    if lk_ms is not None:
+        out['MTK_LK_MS'] = lk_ms
+    if out:
+        out['MTK_BL_TOTAL_MS'] = (pl_ms or 0) + (lk_ms or 0)
     return out
 
 
@@ -532,9 +658,11 @@ def print_single_report(samples_path):
             stamp = f'{ns / 1e9:.3f} 秒' if ns is not None else '未知'
             print(f"{name}: 首次采样状态={svc['state']}，系统记录的首次启动={stamp}")
 
-    bl = samples[0][1].get('bootloader_boottime', {})
+    bl = dict(samples[0][1].get('bootloader_boottime', {}))
     if not bl:
-        bl = read_qcom_kpi(samples_path.with_name('bootloader-kpi.tsv'))
+        bl.update(read_uefilog_bl(samples_path.with_name('bootloader-uefi.txt')))
+        bl.update(read_mtk_bootprof(samples_path.with_name('bootloader-bootprof.txt')))
+        bl.update(read_qcom_kpi(samples_path.with_name('bootloader-kpi.tsv')))
     _print_bootloader_boottime(bl)
     _print_init_stage_properties(samples[-1][1].get('init_stages', ()))
     _print_init_events_summary(read_init_events(samples_path.with_name('init-events.tsv')))

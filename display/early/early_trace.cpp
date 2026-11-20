@@ -11,6 +11,7 @@ static std::mutex g_trace_mu;
 static FILE* g_trace_fp = nullptr;
 static size_t g_trace_bytes = 0;
 static std::unordered_map<std::string, std::string> g_last_kv;
+static std::string g_last_bl_sig;
 constexpr size_t kMaxTraceBytes = 512 * 1024;
 
 static std::string clean_tsv_field(const std::string& s) {
@@ -38,6 +39,7 @@ void trace_open() {
     g_trace_fp = fopen(kEarlyTracePath, "w");
     g_trace_bytes = 0;
     g_last_kv.clear();
+    g_last_bl_sig.clear();
     if (g_trace_fp) {
         setvbuf(g_trace_fp, nullptr, _IOLBF, 0);
         const char* hdr = "# ts_ms\ttype\tfields...\n";
@@ -74,6 +76,55 @@ void trace_bl(int64_t ts_ms, const std::string& bl_line, int64_t total_ms) {
     std::string line = std::to_string(ts_ms) + "\tBL\t" + std::to_string(total_ms)
         + "\t" + clean_tsv_field(bl_line);
     write_trace_line(line);
+}
+
+void trace_bl_meta(
+        const std::string& source, int64_t timeline_ms, int64_t wait_ms, const std::string& meta_line) {
+    if (!trace_is_open()) return;
+    std::string line = "0\tBLMETA\t" + clean_tsv_field(source)
+        + "\t" + std::to_string(timeline_ms)
+        + "\t" + std::to_string(wait_ms)
+        + "\t" + clean_tsv_field(meta_line);
+    write_trace_line(line);
+}
+
+void trace_bl_stage(const BlStage& st) {
+    if (!trace_is_open()) return;
+    std::string line = "0\tBLSTG\t" + clean_tsv_field(st.id)
+        + "\t" + std::to_string(st.start_ms)
+        + "\t" + std::to_string(st.dur_ms)
+        + "\t" + (st.wait_only ? "1" : "0")
+        + "\t" + clean_tsv_field(st.detail);
+    write_trace_line(line);
+}
+
+void trace_bl_event(const BlEvent& ev) {
+    if (!trace_is_open()) return;
+    std::string line = "0\tBLEV\t" + std::to_string(ev.por_ms)
+        + "\t" + (ev.major ? "1" : "0")
+        + "\t" + clean_tsv_field(ev.text);
+    write_trace_line(line);
+}
+
+void trace_bl_profile(int64_t ts_ms, const BootloaderProfile& profile) {
+    if (!trace_is_open()) return;
+    std::string sig = profile.source + "|" + std::to_string(profile.total_ms) + "|"
+        + std::to_string(profile.stages.size()) + "|" + profile.summary_line + "|" + profile.meta_line;
+    {
+        std::lock_guard<std::mutex> lock(g_trace_mu);
+        if (g_last_bl_sig == sig) return;
+        g_last_bl_sig = sig;
+    }
+    trace_bl(ts_ms, profile.summary_line, profile.total_ms);
+    if (!profile.source.empty() || !profile.stages.empty()) {
+        trace_bl_meta(profile.source, profile.timeline_ms, profile.wait_ms, profile.meta_line);
+        for (const auto& st : profile.stages) {
+            trace_bl_stage(st);
+        }
+        for (const auto& ev : profile.events) {
+            trace_bl_event(ev);
+        }
+    }
 }
 
 void trace_phase(

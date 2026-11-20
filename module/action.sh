@@ -28,7 +28,7 @@ esac
 [ -x "$MODDIR/bootscope_early" ] || MODDIR=/data/adb/modules/bootscope
 if [ -x "$MODDIR/bootscope_early" ] && [ "$1" != "--text-only" ]; then
     echo "Launching BootScope overlay replay..."
-    "$MODDIR/bootscope_early" --replay "$RUN_DIR" --pre-sf 2>&1
+    "$MODDIR/bootscope_early" --replay "$RUN_DIR" --bl --pre-sf 2>&1
 fi
 
 if [ -f "$RUN_DIR/metadata.txt" ]; then
@@ -44,9 +44,12 @@ if [ -f "$RUN_DIR/display-status.txt" ] || [ -f "$RUN_DIR/display-renderer.txt" 
     [ -f "$RUN_DIR/display-renderer.txt" ] && cat "$RUN_DIR/display-renderer.txt"
 fi
 
-if [ -f "$RUN_DIR/bootloader-kpi.tsv" ] || [ -f "$RUN_DIR/samples.txt" ]; then
+if [ -f "$RUN_DIR/bootloader-kpi.tsv" ] || [ -f "$RUN_DIR/bootloader-uefi.txt" ] || [ -f "$RUN_DIR/samples.txt" ]; then
     echo ""
     echo "[Bootloader]"
+    if [ -f "$RUN_DIR/bootloader-uefi.txt" ]; then
+        grep -E 'APBL Exit:|SBL1, Delta|UEFI Total :|Load Image boot_|Apply Overlay total time:|Update Device Tree total time:|Shutting Down UEFI Boot Services:' "$RUN_DIR/bootloader-uefi.txt" 2>/dev/null | sed 's/^/  /'
+    fi
     if [ -f "$RUN_DIR/bootloader-kpi.tsv" ]; then
         awk -F '\t' 'NF>=2 { printf "  %-16s %s\n", $1, $2 }' "$RUN_DIR/bootloader-kpi.tsv"
     fi

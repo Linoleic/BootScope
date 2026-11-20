@@ -1,6 +1,7 @@
 #pragma once
 
 #include "early/boot_sources.h"
+#include "early/bootloader.h"
 #include "early/rules.h"
 #include "early/sys_metrics.h"
 
@@ -102,6 +103,7 @@ struct ReplayData {
     int64_t end_ms = 20000;
     std::string bl_line = "BOOTLOADER TIMING N/A";
     int64_t bl_total_ms = -1;
+    BootloaderProfile bl_profile;
     std::vector<ReplayTraceStage> trace_stages;
     std::vector<ReplayTracePhase> trace_phases;
     std::vector<ReplayTraceKv> trace_kvs;
@@ -115,6 +117,14 @@ struct ReplayData {
 };
 
 bool load_replay_data(const std::string& dir, ReplayData* out);
+
+void build_bl_replay_snapshot(
+    const ReplayData& rd, int64_t por_ms, const RuleSet& rules, int svc_count,
+    PhaseNode* phases_out, StageInfo* stage_out,
+    std::string* exp_line1_out, std::string* exp_line2_out,
+    std::string* cur_states_out, int64_t* svc_start_ms_out,
+    SysMetrics* sys_out, std::vector<TailEntry>* tail_out,
+    std::string* last_transition_out);
 
 void build_replay_snapshot(
     const ReplayData& rd, int64_t sim_ms, const RuleSet& rules,

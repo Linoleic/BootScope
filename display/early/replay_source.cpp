@@ -15,36 +15,25 @@ static std::string join_path(const std::string& dir, const char* file) {
     return dir + "/" + file;
 }
 
-static void parse_bootloader_kpi(const std::string& path, ReplayData* out) {
+static bool parse_bootloader_kpi_file(const std::string& path, QcomKpi* out_kpi) {
     FILE* f = fopen(path.c_str(), "r");
-    if (!f) return;
-    uint64_t bl_start = 0, bl_end = 0, bl_load = 0, mpm_freq = 0;
-    bool has_s = false, has_e = false, has_l = false, has_f = false;
+    if (!f) return false;
+    *out_kpi = QcomKpi{};
+    bool any = false;
     char line[128];
     while (fgets(line, sizeof(line), f)) {
         char k[48]{};
         unsigned long long v = 0;
         if (sscanf(line, "%47s %llu", k, &v) == 2) {
-            if (strcmp(k, "bl_start") == 0) { bl_start = v; has_s = true; }
-            else if (strcmp(k, "bl_end") == 0) { bl_end = v; has_e = true; }
-            else if (strcmp(k, "bl_load_kernel") == 0) { bl_load = v; has_l = true; }
-            else if (strcmp(k, "mpm_freq") == 0) { mpm_freq = v; has_f = true; }
+            if (strcmp(k, "bl_start") == 0) { out_kpi->bl_start = v; out_kpi->has_start = true; any = true; }
+            else if (strcmp(k, "bl_end") == 0) { out_kpi->bl_end = v; out_kpi->has_end = true; any = true; }
+            else if (strcmp(k, "bl_load_kernel") == 0) { out_kpi->bl_load_kernel = v; out_kpi->has_load = true; any = true; }
+            else if (strcmp(k, "kernel_mpm") == 0) { out_kpi->kernel_mpm = v; out_kpi->has_kernel = true; any = true; }
+            else if (strcmp(k, "mpm_freq") == 0) { out_kpi->mpm_freq = v; out_kpi->has_freq = true; any = true; }
         }
     }
     fclose(f);
-    if (has_s && has_e && bl_end >= bl_start && has_f && mpm_freq > 0) {
-        int64_t tot_ms = (int64_t)llround(((double)(bl_end - bl_start) * 1000.0) / (double)mpm_freq);
-        out->bl_total_ms = tot_ms;
-        char buf[64];
-        if (has_l && bl_load >= bl_start && bl_load <= bl_end) {
-            int64_t pre = (int64_t)llround(((double)(bl_load - bl_start) * 1000.0) / (double)mpm_freq);
-            int64_t kl = (int64_t)llround(((double)(bl_end - bl_load) * 1000.0) / (double)mpm_freq);
-            snprintf(buf, sizeof(buf), "QCOM KPI PRE:%lldMS KL:%lldMS", (long long)pre, (long long)kl);
-        } else {
-            snprintf(buf, sizeof(buf), "QCOM KPI BL:%lldMS F:%llu", (long long)tot_ms, (unsigned long long)mpm_freq);
-        }
-        out->bl_line = buf;
-    }
+    return any;
 }
 
 static std::string map_sample_svc_state(const std::string& v) {
@@ -87,7 +76,10 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
         fclose(f);
     }
 
-    parse_bootloader_kpi(join_path(dir, "bootloader-kpi.tsv"), out);
+    QcomKpi qcom_kpi;
+    bool has_qcom_kpi = parse_bootloader_kpi_file(join_path(dir, "bootloader-kpi.tsv"), &qcom_kpi);
+    std::string sample_boottime;
+    std::string sample_boottime_extra;
 
     if (FILE* f = fopen(join_path(dir, "init-events.tsv").c_str(), "r")) {
         char line[512];
@@ -195,8 +187,11 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
             } else if (has_cur) {
                 char key[96]{}, val[256]{};
                 if (sscanf(line, "[%95[^]]]: [%255[^]]]", key, val) == 2) {
-                    if (strcmp(key, "ro.boot.boottime") == 0 && out->bl_line == "BOOTLOADER TIMING N/A") {
-                        out->bl_line = val;
+                    if (strcmp(key, "ro.boot.boottime") == 0) {
+                        if (sample_boottime.empty()) sample_boottime = val;
+                        if (out->bl_line == "BOOTLOADER TIMING N/A") out->bl_line = val;
+                    } else if (strcmp(key, "ro.boot.boottime_extra") == 0) {
+                        if (sample_boottime_extra.empty()) sample_boottime_extra = val;
                     }
                     static const char* const kKeys[9] = {
                         "init.svc.surfaceflinger", "init.svc.bootanim", "init.svc.zygote",
@@ -249,8 +244,35 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
                 out->trace_kvs.push_back(std::move(kv));
             } else if (rtype == "BL" && cols.size() >= 4) {
                 int64_t bms = strtoll(cols[2].c_str(), nullptr, 10);
-                if (bms >= 0) out->bl_total_ms = bms;
-                if (!cols[3].empty()) out->bl_line = cols[3];
+                if (bms >= 0) {
+                    out->bl_total_ms = bms;
+                    out->bl_profile.total_ms = bms;
+                }
+                if (!cols[3].empty()) {
+                    out->bl_line = cols[3];
+                    out->bl_profile.summary_line = cols[3];
+                }
+            } else if (rtype == "BLMETA" && cols.size() >= 5) {
+                out->bl_profile.stages.clear();
+                out->bl_profile.events.clear();
+                out->bl_profile.source = cols[2];
+                out->bl_profile.timeline_ms = strtoll(cols[3].c_str(), nullptr, 10);
+                out->bl_profile.wait_ms = strtoll(cols[4].c_str(), nullptr, 10);
+                out->bl_profile.meta_line = (cols.size() >= 6) ? cols[5] : "";
+            } else if (rtype == "BLSTG" && cols.size() >= 7) {
+                BlStage st;
+                st.id = cols[2];
+                st.start_ms = strtoll(cols[3].c_str(), nullptr, 10);
+                st.dur_ms = strtoll(cols[4].c_str(), nullptr, 10);
+                st.wait_only = (cols[5] == "1");
+                st.detail = cols[6];
+                out->bl_profile.stages.push_back(std::move(st));
+            } else if (rtype == "BLEV" && cols.size() >= 5) {
+                BlEvent bev;
+                bev.por_ms = strtoll(cols[2].c_str(), nullptr, 10);
+                bev.major = (cols[3] == "1");
+                bev.text = cols[4];
+                out->bl_profile.events.push_back(std::move(bev));
             } else if (rtype == "PHASE" && cols.size() >= 7) {
                 ReplayTracePhase tp;
                 tp.ts_ms = ts_ms;
@@ -326,6 +348,38 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
             || !out->trace_phases.empty() || !out->trace_kvs.empty() || !out->trace_stages.empty();
     }
 
+    if (out->bl_profile.stages.empty()) {
+        BootloaderProfile parsed;
+        bool ok = parse_qcom_uefilog_file(join_path(dir, "bootloader-uefi.txt"), &parsed);
+        if (ok && has_qcom_kpi) {
+            merge_qcom_kpi_into_uefilog(qcom_kpi, &parsed);
+        }
+        if (!ok && (!sample_boottime.empty() || !sample_boottime_extra.empty())) {
+            ok = parse_boottime_props(sample_boottime, sample_boottime_extra, &parsed);
+        }
+        if (!ok) {
+            ok = parse_mtk_bootprof_file(join_path(dir, "bootloader-bootprof.txt"), &parsed);
+        }
+        if (!ok) {
+            ok = parse_qcom_sysfs_kpi_file(join_path(dir, "bootloader-sysfs-kpi.txt"), &parsed);
+        }
+        if (!ok && has_qcom_kpi) {
+            ok = build_qcom_kpi_profile(qcom_kpi, &parsed);
+        }
+        if (ok) {
+            out->bl_profile = std::move(parsed);
+        }
+    }
+    if (out->bl_profile.total_ms >= 0) {
+        out->bl_total_ms = out->bl_profile.total_ms;
+        if (!out->bl_profile.summary_line.empty() && out->bl_profile.summary_line != "BOOTLOADER TIMING N/A") {
+            out->bl_line = out->bl_profile.summary_line;
+        }
+    }
+    if (out->bl_profile.timeline_ms < 0 && out->bl_profile.total_ms > 0) {
+        out->bl_profile.timeline_ms = out->bl_profile.total_ms;
+    }
+
     for (const auto& bev : out->boot_events) {
         if ((bev.tag == "wm_boot_animation_done" || bev.tag == "sf_stop_bootanim") && bev.ts_ms > bootanim_done_ms) {
             bootanim_done_ms = bev.ts_ms;
@@ -333,7 +387,9 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
     }
 
     out->start_ms = (first_frame_ms >= 0) ? first_frame_ms : 0;
-    out->pre_start_ms = (started_ms >= 0 && started_ms < out->start_ms) ? started_ms : out->start_ms;
+    out->pre_start_ms = (!out->init_events.empty() && out->start_ms > 0)
+        ? 0
+        : ((started_ms >= 0 && started_ms < out->start_ms) ? started_ms : out->start_ms);
     if (released_ms > out->start_ms) {
         out->end_ms = released_ms;
     } else if (bootanim_done_ms > out->start_ms) {
@@ -392,6 +448,104 @@ static void sync_replay_stage(
     }
 }
 
+static std::string fmt_bl_dur(int64_t ms) {
+    char b[24];
+    if (ms >= 1000) {
+        snprintf(b, sizeof(b), "%.2fS", ms / 1000.0);
+    } else {
+        snprintf(b, sizeof(b), "%lldMS", (long long)std::max<int64_t>(0, ms));
+    }
+    return b;
+}
+
+void build_bl_replay_snapshot(
+        const ReplayData& rd, int64_t por_ms, const RuleSet& rules, int svc_count,
+        PhaseNode* phases_out, StageInfo* stage_out,
+        std::string* exp_line1_out, std::string* exp_line2_out,
+        std::string* cur_states_out, int64_t* svc_start_ms_out,
+        SysMetrics* sys_out, std::vector<TailEntry>* tail_out,
+        std::string* last_transition_out) {
+    const char* ids[] = {"BL", "INIT", "ZYG", "PRE", "PMS", "AMS"};
+    for (int i = 0; i < 6; i++) {
+        phases_out[i] = PhaseNode{};
+        phases_out[i].id = ids[i];
+    }
+    phases_out[0].state = NodeState::Running;
+    phases_out[0].start_ms = 0;
+    phases_out[0].end_ms = -1;
+    phases_out[0].detail = rd.bl_line;
+
+    phases_out[1].detail = "EARLY-INIT -> ZYGOTE";
+    phases_out[2].detail = "ZYGOTE -> SYSTEM_SERVER";
+    phases_out[3].detail = "PRELOAD CLASSES";
+    phases_out[4].detail = "SYSTEM / DATA PKG SCAN";
+    phases_out[5].detail = "AMS_READY -> SCREEN";
+
+    const BlStage* active = nullptr;
+    for (const auto& s : rd.bl_profile.stages) {
+        if (s.wait_only) continue;
+        if (por_ms >= s.start_ms) active = &s;
+    }
+    if (!active && !rd.bl_profile.stages.empty()) {
+        for (const auto& s : rd.bl_profile.stages) {
+            if (!s.wait_only) { active = &s; break; }
+        }
+    }
+
+    std::string active_id = active ? active->id : std::string("BL");
+    std::string active_det = active ? active->detail : rd.bl_line;
+    int64_t active_el = active ? std::max<int64_t>(0, std::min(por_ms - active->start_ms, active->dur_ms)) : por_ms;
+    int64_t active_dur = active ? active->dur_ms : rd.bl_profile.total_ms;
+
+    *stage_out = {0, active_id, std::to_string(std::max<int64_t>(0, por_ms))};
+    *exp_line1_out = sanitize_tail_text(rules, "STAGE:" + active_id + "  " + active_det, 57);
+    std::string src_name = rd.bl_profile.source.empty() ? std::string("BL") : rd.bl_profile.source;
+    int64_t tot_ms = (rd.bl_profile.total_ms >= 0) ? rd.bl_profile.total_ms : rd.bl_profile.timeline_ms;
+    if (!rd.bl_profile.meta_line.empty()) {
+        *exp_line2_out = sanitize_tail_text(rules, rd.bl_profile.meta_line, 57);
+    } else {
+        *exp_line2_out = sanitize_tail_text(
+            rules, "SRC:" + src_name + "  TOTAL:" + fmt_bl_dur(tot_ms), 57);
+    }
+
+    for (int i = 0; i < svc_count; i++) {
+        cur_states_out[i] = "-";
+        svc_start_ms_out[i] = -1;
+    }
+    *last_transition_out = "BL POR -> KERNEL";
+
+    *sys_out = SysMetrics{};
+    std::string src_row = "BL SRC:" + src_name + "  TOT:" + fmt_bl_dur(tot_ms);
+    if (rd.bl_profile.wait_ms > 0) {
+        src_row += "  WAIT:" + fmt_bl_dur(rd.bl_profile.wait_ms);
+    }
+    sys_out->rows.push_back({"BL_SRC", sanitize_tail_text(rules, src_row, 59), false});
+    std::string meta_row = rd.bl_profile.meta_line.empty()
+        ? std::string("HARDWARE BOOTLOADER PHASE")
+        : sanitize_tail_text(rules, rd.bl_profile.meta_line, 59);
+    sys_out->rows.push_back({"BL_META", meta_row, false});
+    sys_out->rows.push_back({
+        "BL_CUR",
+        sanitize_tail_text(rules, "ACTIVE:" + active_id + "  " + fmt_bl_dur(active_el) + "/" + fmt_bl_dur(active_dur), 59),
+        false
+    });
+
+    tail_out->clear();
+    uint64_t seq = 1;
+    for (const auto& bev : rd.bl_profile.events) {
+        if (bev.por_ms > por_ms) break;
+        std::string txt = sanitize_tail_text(rules, bev.text, kTailLineChars - 8);
+        if (txt.empty()) continue;
+        TailEntry e;
+        e.ts_ms = bev.por_ms;
+        e.seq = seq++;
+        e.source = "B";
+        e.text = txt;
+        e.kind = bev.major ? TailKind::Stage : TailKind::Info;
+        tail_out->push_back(std::move(e));
+    }
+}
+
 void build_replay_snapshot(
         const ReplayData& rd, int64_t sim_ms, const RuleSet& rules,
         const char* const* short_names, int svc_count,
@@ -403,6 +557,7 @@ void build_replay_snapshot(
         int* cpu_pct_out, int* io_pct_out, int* mem_pct_out,
         SysMetrics* sys_out, std::vector<TailEntry>* tail_out,
         std::string* last_transition_out) {
+    *sys_out = SysMetrics{};
     const char* ids[] = {"BL", "INIT", "ZYG", "PRE", "PMS", "AMS"};
     for (int i = 0; i < 6; i++) {
         phases_out[i] = PhaseNode{};
@@ -504,6 +659,7 @@ void build_replay_snapshot(
         for (const auto& tp : rd.trace_phases) {
             if (tp.ts_ms > sim_ms) break;
             if (tp.idx < 0 || tp.idx >= 6) continue;
+            if (tp.idx == 0 && tp.end_ms < 0 && rd.bl_total_ms >= 0) continue;
             if (tp.state == 0) phases_out[tp.idx].state = NodeState::Pending;
             else if (tp.state == 1) phases_out[tp.idx].state = NodeState::Running;
             else phases_out[tp.idx].state = NodeState::Done;

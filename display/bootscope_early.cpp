@@ -1,4 +1,5 @@
 #include "early/boot_sources.h"
+#include "early/bootloader.h"
 #include "early/canvas.h"
 #include "early/common.h"
 #include "early/early_trace.h"
@@ -79,7 +80,9 @@ bool reexec_from_tmp_if_needed(int argc, char** argv) {
 struct RenderContext {
     bool preview = false;
     bool replay = false;
+    bool replay_bl_phase = false;
     bool replay_pre_sf_phase = false;
+    int64_t bl_por_ms = 0;
     int frame_idx = 0;
     int64_t now_ms = 0;
     double uptime_s = 0.0;
@@ -145,7 +148,7 @@ void draw_tail_block(
         uint32_t* px, int stride, int tx0, int tx1, int ty, size_t max_chars, const RenderContext& ctx) {
     fill_rect(px, stride, tx0, ty, tx1, ty + 2, kColorTrack);
     draw_text(px, stride, "EVENTS", tx0, ty + 9, 2, kColorAccent);
-    const char* legend = "K=INIT P=PROG S=SVC E=ERR M=MOD";
+    const char* legend = "B=BL K=INIT P=PROG S=SVC E=ERR M=MOD";
     int legend_x = tx1 - (int)strlen(legend) * 12;
     if (legend_x > tx0 + 96) {
         draw_text(px, stride, legend, legend_x, ty + 9, 2, kColorMuted);
@@ -180,7 +183,9 @@ void draw_dashboard(uint32_t* px, int stride, const RenderContext& ctx) {
     fill_rect(px, stride, 0, 0, 8, bh, kColorAccent);
 
     const char* title = ctx.replay
-        ? (ctx.replay_pre_sf_phase ? "BOOTSCOPE / PRE-SF" : "BOOTSCOPE / REPLAY")
+        ? (ctx.replay_bl_phase
+            ? "BOOTSCOPE / BOOTLOADER"
+            : (ctx.replay_pre_sf_phase ? "BOOTSCOPE / PRE-SF" : "BOOTSCOPE / REPLAY"))
         : (ctx.preview ? "BOOTSCOPE / PREVIEW" : "BOOTSCOPE / BOOT");
     draw_text(px, stride, title, 24, 20, 3, kColorAccent);
 
@@ -204,9 +209,14 @@ void draw_dashboard(uint32_t* px, int stride, const RenderContext& ctx) {
     draw_text(px, stride, d2.c_str(), 24, 70, 2, kColorMuted);
 
     char meta_buf[48];
-    snprintf(meta_buf, sizeof(meta_buf), "UPTIME %.2fS  STG %d/%d", ctx.uptime_s, ctx.stage->step, kStageTotal);
+    if (ctx.replay_bl_phase) {
+        snprintf(meta_buf, sizeof(meta_buf), "BL POR %.2fS  STG 0/%d", ctx.bl_por_ms / 1000.0, kStageTotal);
+    } else {
+        snprintf(meta_buf, sizeof(meta_buf), "UPTIME %.2fS  STG %d/%d", ctx.uptime_s, ctx.stage->step, kStageTotal);
+    }
     draw_text(px, stride, meta_buf, 24, 92, 3, kColorPrimary);
 
+    const int64_t phase_clock_ms = ctx.replay_bl_phase ? ctx.bl_por_ms : ctx.now_ms;
     const int bar_top = 122, bar_bottom = 136;
     const int seg_gap = 6;
     const int seg_w = ((left_r - 24) - 5 * seg_gap) / 6;
@@ -219,7 +229,7 @@ void draw_dashboard(uint32_t* px, int stride, const RenderContext& ctx) {
         } else if (ctx.phases[i].state == NodeState::Running) {
             int pulse_w = (seg_w / 3) + ((ctx.frame_idx % 4) * (seg_w / 6));
             if (pulse_w > seg_w) pulse_w = seg_w;
-            int64_t rdur = ctx.phases[i].start_ms >= 0 ? (ctx.now_ms - ctx.phases[i].start_ms) : 0;
+            int64_t rdur = ctx.phases[i].start_ms >= 0 ? (phase_clock_ms - ctx.phases[i].start_ms) : 0;
             uint32_t run_col = (rdur >= 6000) ? kColorError : kColorPrimary;
             fill_rect(px, stride, x0, bar_top, x0 + pulse_w, bar_bottom, run_col);
             fill_rect(px, stride, x0, bar_top, x1, bar_top + 2, kColorAccent);
@@ -246,10 +256,10 @@ void draw_dashboard(uint32_t* px, int stride, const RenderContext& ctx) {
         if (ctx.phases[i].state == NodeState::Done) {
             row_col = kColorAccent;
         } else if (ctx.phases[i].state == NodeState::Running) {
-            int64_t rdur = ctx.phases[i].start_ms >= 0 ? (ctx.now_ms - ctx.phases[i].start_ms) : 0;
+            int64_t rdur = ctx.phases[i].start_ms >= 0 ? (phase_clock_ms - ctx.phases[i].start_ms) : 0;
             row_col = (rdur >= 6000) ? kColorError : kColorPrimary;
         }
-        std::string prow = format_phase_row(ctx.phases[i], ctx.now_ms, *ctx.rules);
+        std::string prow = format_phase_row(ctx.phases[i], phase_clock_ms, *ctx.rules);
         if (prow.size() > left_chars) prow.resize(left_chars);
         draw_text(px, stride, prow.c_str(), 24, tree_y, 2, row_col);
         tree_y += 20;
@@ -388,6 +398,7 @@ int main(int argc, char** argv) {
 
     bool preview = false;
     bool replay_mode = false;
+    bool replay_bl = false;
     bool replay_pre_sf = false;
     std::string replay_dir;
     float replay_speed = 1.0f;
@@ -397,6 +408,8 @@ int main(int argc, char** argv) {
             replay_mode = true;
             preview = true;
             replay_dir = argv[++i];
+        } else if (strcmp(argv[i], "--bl") == 0) {
+            replay_bl = true;
         } else if (strcmp(argv[i], "--pre-sf") == 0) {
             replay_pre_sf = true;
         } else if (strcmp(argv[i], "--speed") == 0 && i + 1 < argc) {
@@ -426,10 +439,11 @@ int main(int argc, char** argv) {
     EventState ev_state;
     load_rules(&ev_state.rules);
     DeviceInfo dev_info = collect_device_info(ev_state.rules);
-    std::string bootloader_line = build_bootloader_line();
-    init_phases(&ev_state, bootloader_line);
+    BootloaderProfile bl_profile = collect_bootloader_profile();
+    std::string bootloader_line = bl_profile.summary_line;
+    init_phases(&ev_state, bl_profile);
     if (!preview && !replay_mode) {
-        trace_bl(boottime_ms(), bootloader_line, -1);
+        trace_bl_profile(boottime_ms(), bl_profile);
     }
 
     ReplayData replay_data;
@@ -439,6 +453,18 @@ int main(int argc, char** argv) {
             return 1;
         }
         bootloader_line = replay_data.bl_line;
+        const BootloaderProfile& bp = replay_data.bl_profile;
+        fprintf(logf, "bl_source=%s bl_total_ms=%lld bl_stages=%zu bl_summary=%s\n",
+                bp.source.empty() ? "NONE" : bp.source.c_str(),
+                (long long)replay_data.bl_total_ms,
+                bp.stages.size(),
+                bootloader_line.c_str());
+    } else {
+        fprintf(logf, "bl_source=%s bl_total_ms=%lld bl_stages=%zu bl_summary=%s\n",
+                bl_profile.source.empty() ? "NONE" : bl_profile.source.c_str(),
+                (long long)bl_profile.total_ms,
+                bl_profile.stages.size(),
+                bootloader_line.c_str());
     }
 
     pthread_t ev_thread{};
@@ -652,16 +678,31 @@ int main(int argc, char** argv) {
         }
 
         int64_t now_ms = boottime_ms();
+        bool in_bl_phase = false;
+        int64_t bl_por_ms = 0;
+        std::string bl_exp_line1;
+        std::string bl_exp_line2;
         if (replay_mode) {
-            int64_t base_ms = replay_pre_sf ? replay_data.pre_start_ms : replay_data.start_ms;
+            int64_t bl_span_ms = (replay_bl && replay_data.bl_profile.timeline_ms > 0)
+                ? replay_data.bl_profile.timeline_ms
+                : 0;
             int64_t elapsed_ms = now_ms - loop_start;
             if (elapsed_ms < 0) elapsed_ms = 0;
-            int64_t sim_now = base_ms + (int64_t)llround((double)elapsed_ms * (double)replay_speed);
-            if (sim_now >= replay_data.end_ms) {
-                now_ms = replay_data.end_ms;
-                replay_finished = true;
+            int64_t virtual_elapsed = (int64_t)llround((double)elapsed_ms * (double)replay_speed);
+            if (bl_span_ms > 0 && virtual_elapsed < bl_span_ms) {
+                in_bl_phase = true;
+                bl_por_ms = virtual_elapsed;
+                now_ms = 0;
             } else {
-                now_ms = sim_now;
+                int64_t post_bl_elapsed = virtual_elapsed - bl_span_ms;
+                int64_t base_ms = replay_pre_sf ? replay_data.pre_start_ms : replay_data.start_ms;
+                int64_t sim_now = base_ms + post_bl_elapsed;
+                if (sim_now >= replay_data.end_ms) {
+                    now_ms = replay_data.end_ms;
+                    replay_finished = true;
+                } else {
+                    now_ms = sim_now;
+                }
             }
         }
         double uptime_s = now_ms / 1000.0;
@@ -682,12 +723,19 @@ int main(int argc, char** argv) {
         bool svc_changed = false;
         if (replay_mode) {
             std::vector<TailEntry> full_tail;
-            build_replay_snapshot(
-                replay_data, now_ms, ev_state.rules, short_names, kSvcCount,
-                phases_snap, &stage, &init_ms_snap, &last_action,
-                &max_init_svc, &max_init_dur_ms, &wait_svc, &wait_dur_ms, &active_cnt,
-                cur_states, svc_start_ms, &cpu_pct, &io_pct, &mem_pct,
-                &sys_metrics, &full_tail, &last_transition);
+            if (in_bl_phase) {
+                build_bl_replay_snapshot(
+                    replay_data, bl_por_ms, ev_state.rules, kSvcCount,
+                    phases_snap, &stage, &bl_exp_line1, &bl_exp_line2,
+                    cur_states, svc_start_ms, &sys_metrics, &full_tail, &last_transition);
+            } else {
+                build_replay_snapshot(
+                    replay_data, now_ms, ev_state.rules, short_names, kSvcCount,
+                    phases_snap, &stage, &init_ms_snap, &last_action,
+                    &max_init_svc, &max_init_dur_ms, &wait_svc, &wait_dur_ms, &active_cnt,
+                    cur_states, svc_start_ms, &cpu_pct, &io_pct, &mem_pct,
+                    &sys_metrics, &full_tail, &last_transition);
+            }
             size_t total = full_tail.size();
             size_t start_idx = total > max_rows ? (total - max_rows) : 0;
             for (size_t i = start_idx; i < total; i++) {
@@ -870,8 +918,14 @@ int main(int argc, char** argv) {
                 + " ANIM_EXIT=" + (ae.empty() ? std::string("0") : ae);
             exp_col2 = kColorPrimary;
         } else if (expanded_idx == 0) {
-            exp_line1 = sanitize_tail_text(ev_state.rules, bootloader_line, 57);
-            exp_line2 = "WAITING EARLY INIT";
+            if (!bl_exp_line1.empty()) {
+                exp_line1 = bl_exp_line1;
+                exp_line2 = bl_exp_line2;
+                exp_col2 = kColorPrimary;
+            } else {
+                exp_line1 = sanitize_tail_text(ev_state.rules, bootloader_line, 57);
+                exp_line2 = "WAITING EARLY INIT";
+            }
         }
 
         std::string footer;
@@ -889,7 +943,9 @@ int main(int argc, char** argv) {
         RenderContext ctx;
         ctx.preview = preview;
         ctx.replay = replay_mode;
-        ctx.replay_pre_sf_phase = replay_mode && replay_pre_sf && (now_ms < replay_data.start_ms);
+        ctx.replay_bl_phase = replay_mode && in_bl_phase;
+        ctx.replay_pre_sf_phase = replay_mode && !in_bl_phase && replay_pre_sf && (now_ms < replay_data.start_ms);
+        ctx.bl_por_ms = bl_por_ms;
         ctx.frame_idx = frame_idx;
         ctx.now_ms = now_ms;
         ctx.uptime_s = uptime_s;

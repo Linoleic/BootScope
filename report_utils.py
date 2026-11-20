@@ -11,10 +11,12 @@ from analyze_probe import (
     compute_psi_intervals,
     read_boot_events,
     read_init_events,
+    read_mtk_bootprof,
     read_proc_samples,
     read_psi_samples,
     read_qcom_kpi,
     read_samples,
+    read_uefilog_bl,
 )
 
 
@@ -47,9 +49,11 @@ def load_boot_run(samples_path: Path) -> dict:
     display_renderer = _read_kv_file(renderer_path)
     display_status = _read_kv_file(run_dir / 'display-status.txt')
 
-    bootloader = samples[0][1].get('bootloader_boottime', {})
+    bootloader = dict(samples[0][1].get('bootloader_boottime', {}))
     if not bootloader:
-        bootloader = read_qcom_kpi(run_dir / 'bootloader-kpi.tsv')
+        bootloader.update(read_uefilog_bl(run_dir / 'bootloader-uefi.txt'))
+        bootloader.update(read_mtk_bootprof(run_dir / 'bootloader-bootprof.txt'))
+        bootloader.update(read_qcom_kpi(run_dir / 'bootloader-kpi.tsv'))
     label = metadata.get('boot_id') or run_dir.name or samples_path.name
     return {
         'label': label,

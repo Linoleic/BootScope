@@ -20,6 +20,8 @@ mkdir "$RUN/.probe.lock" 2>/dev/null || exit 0
     echo "started_uptime=$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null)"
     echo "android_version=$(getprop ro.build.version.release)"
     echo "sdk=$(getprop ro.build.version.sdk)"
+    echo "bootreason=$(getprop ro.boot.bootreason)"
+    echo "slot_suffix=$(getprop ro.boot.slot_suffix)"
 } > "$RUN/metadata.txt"
 
 COUNT=0
@@ -205,6 +207,15 @@ done
         }
     }
 ' > "$RUN/init-events.tsv"
+if [ -r /dev/logfs/UefiLog0.txt ]; then
+    tr -d '\000\r' < /dev/logfs/UefiLog0.txt | sed 's/[[:space:]]*$//' | grep -v '^$' | head -n 700 > "$RUN/bootloader-uefi.txt" 2>/dev/null
+fi
+if [ -r /proc/bootprof ]; then
+    head -n 120 /proc/bootprof > "$RUN/bootloader-bootprof.txt" 2>/dev/null
+fi
+if [ -r /sys/kernel/boot_kpi/kpi_values ]; then
+    head -n 120 /sys/kernel/boot_kpi/kpi_values > "$RUN/bootloader-sysfs-kpi.txt" 2>/dev/null
+fi
 {
     echo "finished_uptime=$(cut -d ' ' -f 1 /proc/uptime 2>/dev/null)"
     echo "samples=$COUNT"

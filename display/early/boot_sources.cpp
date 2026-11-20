@@ -251,33 +251,25 @@ static bool is_module_error_hint(const RuleSet& rules, const std::string& raw) {
 }
 
 static void update_qcom_kpi_locked(EventState* st) {
-    const std::string& cur = st->phases[0].detail;
-    if (cur != "BOOTLOADER TIMING N/A" && cur.rfind("QCOM KPI", 0) != 0) {
+    if (st->bl_profile.source == "UEFILOG") {
+        if (merge_qcom_kpi_into_uefilog(st->qcom_kpi, &st->bl_profile)) {
+            st->phases[0].start_ms = 0;
+            st->phases[0].end_ms = st->bl_profile.total_ms;
+            st->phases[0].detail = st->bl_profile.summary_line;
+            trace_bl_profile(0, st->bl_profile);
+        }
         return;
     }
-    const QcomKpi& k = st->qcom_kpi;
-    if (!k.has_start || !k.has_end || k.bl_end < k.bl_start) return;
-    uint64_t total_ticks = k.bl_end - k.bl_start;
-    if (k.has_freq && k.mpm_freq > 0) {
-        int64_t total_ms = (int64_t)llround(((double)total_ticks * 1000.0) / (double)k.mpm_freq);
+    if (!st->bl_profile.source.empty() && st->bl_profile.source != "QCOM_KPI") {
+        return;
+    }
+    BootloaderProfile prof;
+    if (build_qcom_kpi_profile(st->qcom_kpi, &prof)) {
+        st->bl_profile = std::move(prof);
         st->phases[0].start_ms = 0;
-        st->phases[0].end_ms = total_ms;
-        char buf[64];
-        if (k.has_load && k.bl_load_kernel >= k.bl_start && k.bl_load_kernel <= k.bl_end) {
-            int64_t pre_ms = (int64_t)llround(((double)(k.bl_load_kernel - k.bl_start) * 1000.0) / (double)k.mpm_freq);
-            int64_t kl_ms = (int64_t)llround(((double)(k.bl_end - k.bl_load_kernel) * 1000.0) / (double)k.mpm_freq);
-            snprintf(buf, sizeof(buf), "QCOM KPI PRE:%lldMS KL:%lldMS",
-                     (long long)pre_ms, (long long)kl_ms);
-        } else {
-            snprintf(buf, sizeof(buf), "QCOM KPI BL:%lldMS F:%llu",
-                     (long long)total_ms, (unsigned long long)k.mpm_freq);
-        }
-        st->phases[0].detail = buf;
-        trace_bl(0, buf, total_ms);
-    } else {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "QCOM KPI TICKS:%llu", (unsigned long long)total_ticks);
-        st->phases[0].detail = buf;
+        st->phases[0].end_ms = st->bl_profile.total_ms;
+        st->phases[0].detail = st->bl_profile.summary_line;
+        trace_bl_profile(0, st->bl_profile);
     }
 }
 
@@ -700,50 +692,8 @@ void* event_reader_thread(void* arg) {
     return nullptr;
 }
 
-static void append_kv_tokens(const std::string& raw, std::vector<std::pair<std::string, std::string>>& kvs) {
-    size_t start = 0;
-    while (start < raw.size()) {
-        size_t comma = raw.find(',', start);
-        std::string item = (comma == std::string::npos) ? raw.substr(start) : raw.substr(start, comma - start);
-        size_t colon = item.find(':');
-        if (colon != std::string::npos && colon > 0 && colon + 1 < item.size()) {
-            kvs.emplace_back(item.substr(0, colon), item.substr(colon + 1));
-        }
-        if (comma == std::string::npos) break;
-        start = comma + 1;
-    }
-}
-
 std::string build_bootloader_line() {
-    std::vector<std::pair<std::string, std::string>> kvs;
-    append_kv_tokens(get_prop("ro.boot.boottime"), kvs);
-    append_kv_tokens(get_prop("ro.boot.boottime_extra"), kvs);
-    if (kvs.empty()) return "BOOTLOADER TIMING N/A";
-
-    const char* preferred[] = {"2BLE", "3BLE", "AVB", "KL", "DISP", "DRAM_TRAIN", "FWL"};
-    std::string line;
-    for (const char* key : preferred) {
-        for (const auto& kv : kvs) {
-            if (kv.first == key && kv.second != "0") {
-                std::string tok = (line.empty() ? "" : " ") + kv.first + ":" + kv.second;
-                if (line.size() + tok.size() <= 42) {
-                    line += tok;
-                }
-                break;
-            }
-        }
-    }
-    if (line.empty()) {
-        for (const auto& kv : kvs) {
-            std::string tok = (line.empty() ? "" : " ") + kv.first + ":" + kv.second;
-            if (line.size() + tok.size() <= 42) {
-                line += tok;
-            } else {
-                break;
-            }
-        }
-    }
-    return line.empty() ? "BOOTLOADER TIMING N/A" : line;
+    return collect_bootloader_profile().summary_line;
 }
 
 std::string short_init_action(const std::string& act) {
@@ -752,17 +702,23 @@ std::string short_init_action(const std::string& act) {
     return upper_copy(act);
 }
 
-void init_phases(EventState* st, const std::string& bl_detail) {
+void init_phases(EventState* st, const BootloaderProfile& bl_profile) {
     std::lock_guard<std::mutex> lock(st->mu);
     const char* ids[] = {"BL", "INIT", "ZYG", "PRE", "PMS", "AMS"};
     for (int i = 0; i < 6; i++) {
         st->phases[i] = PhaseNode{};
         st->phases[i].id = ids[i];
     }
+    st->bl_profile = bl_profile;
     st->phases[0].state = NodeState::Done;
-    st->phases[0].start_ms = -1;
-    st->phases[0].end_ms = -1;
-    st->phases[0].detail = bl_detail;
+    if (bl_profile.total_ms >= 0) {
+        st->phases[0].start_ms = 0;
+        st->phases[0].end_ms = bl_profile.total_ms;
+    } else {
+        st->phases[0].start_ms = -1;
+        st->phases[0].end_ms = -1;
+    }
+    st->phases[0].detail = bl_profile.summary_line;
 
     st->phases[1].state = NodeState::Running;
     st->phases[1].start_ms = 0;
