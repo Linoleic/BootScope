@@ -80,14 +80,23 @@ struct ReplayTracePhase {
     std::string detail;
 };
 
+struct ReplayTraceKv {
+    int64_t ts_ms = 0;
+    std::string key;
+    std::string text;
+    bool alert = false;
+};
+
 struct ReplayData {
     bool loaded = false;
     bool has_trace = false;
+    int64_t pre_start_ms = 0;
     int64_t start_ms = 0;
     int64_t end_ms = 20000;
     std::string bl_line = "BOOTLOADER TIMING N/A";
     int64_t bl_total_ms = -1;
     std::vector<ReplayTracePhase> trace_phases;
+    std::vector<ReplayTraceKv> trace_kvs;
     std::vector<ReplayTraceTail> trace_tails;
     std::vector<ReplayTraceMetric> trace_metrics;
     std::vector<ReplayInitEv> init_events;

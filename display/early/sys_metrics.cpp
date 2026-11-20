@@ -357,6 +357,27 @@ void read_top_cpu(SysSampleState* st, std::vector<TopProc>* out) {
         return a.pct > b.pct;
     });
     if (out->size() > 3) out->resize(3);
+    for (auto& tp : *out) {
+        char cpath[48];
+        snprintf(cpath, sizeof(cpath), "/proc/%d/cmdline", tp.pid);
+        int cfd = open(cpath, O_RDONLY | O_CLOEXEC);
+        if (cfd >= 0) {
+            char cbuf[256];
+            ssize_t cn = read(cfd, cbuf, sizeof(cbuf) - 1);
+            close(cfd);
+            if (cn > 0) {
+                cbuf[cn] = '\0';
+                std::string arg0(cbuf);
+                size_t sp = arg0.find(' ');
+                if (sp != std::string::npos) arg0.resize(sp);
+                size_t sl = arg0.rfind('/');
+                if (sl != std::string::npos) arg0 = arg0.substr(sl + 1);
+                if (!arg0.empty() && arg0 != "zygote" && arg0 != "zygote64") {
+                    tp.comm = upper_copy(arg0);
+                }
+            }
+        }
+    }
 }
 
 SysMetrics collect_sys_metrics(int64_t now_ms, SysSampleState* st) {
@@ -366,6 +387,19 @@ SysMetrics collect_sys_metrics(int64_t now_ms, SysSampleState* st) {
     read_disk_io(now_ms, st, &m.io_line, &m.io_busy);
     read_top_cpu(st, &m.top_cpu);
     return m;
+}
+
+void populate_resource_rows(SysMetrics* m, int cpu_pct, int io_pct, int mem_pct) {
+    m->rows.clear();
+    std::string psi_str = "PSI N/A";
+    if (cpu_pct >= 0 && io_pct >= 0 && mem_pct >= 0) {
+        char pb[32];
+        snprintf(pb, sizeof(pb), "PSI C:%2d%% I:%2d%% M:%2d%%", cpu_pct, io_pct, mem_pct);
+        psi_str = pb;
+    }
+    m->rows.push_back({"PSI_FREQ", psi_str + "  " + m->freq_line, (io_pct >= 30 || cpu_pct >= 65)});
+    m->rows.push_back({"MEM", m->mem_line, m->mem_low});
+    m->rows.push_back({"DISK", m->io_line, m->io_busy});
 }
 
 }  // namespace bootscope

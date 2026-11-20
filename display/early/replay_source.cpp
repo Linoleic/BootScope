@@ -58,6 +58,7 @@ static std::string map_sample_svc_state(const std::string& v) {
 bool load_replay_data(const std::string& dir, ReplayData* out) {
     *out = ReplayData{};
     double max_sec = 0.0;
+    int64_t started_ms = -1;
     int64_t first_frame_ms = -1;
     int64_t released_ms = -1;
     int64_t bootanim_done_ms = -1;
@@ -66,7 +67,9 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
         char line[256];
         while (fgets(line, sizeof(line), f)) {
             long long v = 0;
-            if (sscanf(line, "first_frame_submitted_ms=%lld", &v) == 1 && v >= 0 && v <= 300000) {
+            if (sscanf(line, "started_ms=%lld", &v) == 1 && v >= 0 && v <= 300000) {
+                started_ms = (int64_t)v;
+            } else if (sscanf(line, "first_frame_submitted_ms=%lld", &v) == 1 && v >= 0 && v <= 300000) {
                 first_frame_ms = (int64_t)v;
             } else if (sscanf(line, "released_ms=%lld", &v) == 1 && v >= 0 && v <= 300000) {
                 released_ms = (int64_t)v;
@@ -234,8 +237,16 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
             if (ts_ms / 1000.0 > max_sec) max_sec = ts_ms / 1000.0;
             const std::string& rtype = cols[1];
             if (rtype == "LIFE") {
-                if (cols[2] == "first_frame" && first_frame_ms < 0) first_frame_ms = ts_ms;
+                if (cols[2] == "started" && started_ms < 0) started_ms = ts_ms;
+                else if (cols[2] == "first_frame" && first_frame_ms < 0) first_frame_ms = ts_ms;
                 else if (cols[2] == "released") released_ms = ts_ms;
+            } else if (rtype == "KV" && cols.size() >= 4) {
+                ReplayTraceKv kv;
+                kv.ts_ms = ts_ms;
+                kv.key = cols[2];
+                kv.text = cols[3];
+                kv.alert = (cols.size() >= 5 && cols[4] == "1");
+                out->trace_kvs.push_back(std::move(kv));
             } else if (rtype == "BL" && cols.size() >= 4) {
                 int64_t bms = strtoll(cols[2].c_str(), nullptr, 10);
                 if (bms >= 0) out->bl_total_ms = bms;
@@ -296,11 +307,14 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
         fclose(f);
         std::sort(out->trace_phases.begin(), out->trace_phases.end(),
                   [](const ReplayTracePhase& a, const ReplayTracePhase& b) { return a.ts_ms < b.ts_ms; });
+        std::sort(out->trace_kvs.begin(), out->trace_kvs.end(),
+                  [](const ReplayTraceKv& a, const ReplayTraceKv& b) { return a.ts_ms < b.ts_ms; });
         std::sort(out->trace_tails.begin(), out->trace_tails.end(),
                   [](const ReplayTraceTail& a, const ReplayTraceTail& b) { return a.ts_ms < b.ts_ms; });
         std::sort(out->trace_metrics.begin(), out->trace_metrics.end(),
                   [](const ReplayTraceMetric& a, const ReplayTraceMetric& b) { return a.ts_ms < b.ts_ms; });
-        out->has_trace = !out->trace_tails.empty() || !out->trace_metrics.empty() || !out->trace_phases.empty();
+        out->has_trace = !out->trace_tails.empty() || !out->trace_metrics.empty()
+            || !out->trace_phases.empty() || !out->trace_kvs.empty();
     }
 
     for (const auto& bev : out->boot_events) {
@@ -310,6 +324,7 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
     }
 
     out->start_ms = (first_frame_ms >= 0) ? first_frame_ms : 0;
+    out->pre_start_ms = (started_ms >= 0 && started_ms < out->start_ms) ? started_ms : out->start_ms;
     if (released_ms > out->start_ms) {
         out->end_ms = released_ms;
     } else if (bootanim_done_ms > out->start_ms) {
@@ -320,6 +335,24 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
     if (out->end_ms <= out->start_ms) out->end_ms = out->start_ms + 5000;
     out->loaded = out->has_trace || !out->init_events.empty() || !out->boot_events.empty() || !out->svc_points.empty();
     return out->loaded;
+}
+
+static void apply_trace_kvs(const ReplayData& rd, int64_t sim_ms, SysMetrics* sys_out) {
+    for (const auto& kv : rd.trace_kvs) {
+        if (kv.ts_ms > sim_ms) break;
+        bool updated = false;
+        for (auto& r : sys_out->rows) {
+            if (r.key == kv.key) {
+                r.text = kv.text;
+                r.alert = kv.alert;
+                updated = true;
+                break;
+            }
+        }
+        if (!updated) {
+            sys_out->rows.push_back({kv.key, kv.text, kv.alert});
+        }
+    }
 }
 
 void build_replay_snapshot(
@@ -388,12 +421,7 @@ void build_replay_snapshot(
             if (!seen && init_ms_out->size() < 8) init_ms_out->emplace_back(ev.name, ev.ts_ms);
             push_replay_tail(ev.ts_ms, "K", TailKind::Stage, "ACT " + ev.name);
         } else if (ev.kind == "start") {
-            if (ev.name == "zygote" && phases_out[1].state == NodeState::Running) {
-                phases_out[1].state = NodeState::Done;
-                phases_out[1].end_ms = ev.ts_ms;
-                phases_out[2].state = NodeState::Running;
-                phases_out[2].start_ms = ev.ts_ms;
-            }
+            if (ev.name == "zygote") advance_phases_for_zygote(phases_out, ev.ts_ms);
             if (!is_resident_daemon(ev.name)) {
                 active.push_back({ev.name, ev.ts_ms});
             }
@@ -430,74 +458,7 @@ void build_replay_snapshot(
         StageInfo next;
         if (map_framework_stage(bev.tag.c_str(), msb, &next)) {
             *stage_out = next;
-            if (bev.tag == "boot_progress_start") {
-                phases_out[1].state = NodeState::Done;
-                if (phases_out[1].end_ms < 0) phases_out[1].end_ms = bev.ts_ms;
-                if (phases_out[2].start_ms < 0) phases_out[2].start_ms = 0;
-                phases_out[2].state = NodeState::Done;
-                phases_out[2].end_ms = bev.ts_ms;
-                phases_out[2].detail = "SYSTEM_SERVER STARTED";
-                phases_out[3].state = NodeState::Running;
-                phases_out[3].start_ms = bev.ts_ms;
-            } else if (bev.tag == "boot_progress_preload_start") {
-                phases_out[3].state = NodeState::Running;
-                phases_out[3].start_ms = bev.ts_ms;
-            } else if (bev.tag == "boot_progress_preload_end") {
-                if (phases_out[3].start_ms < 0) phases_out[3].start_ms = bev.ts_ms;
-                phases_out[3].state = NodeState::Done;
-                phases_out[3].end_ms = bev.ts_ms;
-                phases_out[3].detail = "PRELOADED";
-                phases_out[4].state = NodeState::Running;
-                phases_out[4].start_ms = bev.ts_ms;
-                phases_out[4].detail = "WAITING SYSTEM_RUN";
-            } else if (bev.tag == "boot_progress_system_run") {
-                if (phases_out[3].state != NodeState::Done) {
-                    if (phases_out[3].start_ms < 0) phases_out[3].start_ms = bev.ts_ms;
-                    phases_out[3].state = NodeState::Done;
-                    phases_out[3].end_ms = bev.ts_ms;
-                }
-                phases_out[4].state = NodeState::Running;
-                if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
-                phases_out[4].detail = "SYSTEM_RUN";
-            } else if (bev.tag == "boot_progress_pms_start") {
-                phases_out[4].state = NodeState::Running;
-                if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
-                phases_out[4].detail = "PMS_START";
-            } else if (bev.tag == "boot_progress_pms_system_scan_start") {
-                phases_out[4].state = NodeState::Running;
-                if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
-                phases_out[4].detail = "SYSTEM_PKG_SCAN";
-            } else if (bev.tag == "boot_progress_pms_data_scan_start") {
-                phases_out[4].state = NodeState::Running;
-                if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
-                phases_out[4].detail = "DATA_PKG_SCAN";
-            } else if (bev.tag == "boot_progress_pms_scan_end") {
-                phases_out[4].detail = "SCAN_END";
-            } else if (bev.tag == "boot_progress_pms_ready") {
-                if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
-                phases_out[4].state = NodeState::Done;
-                phases_out[4].end_ms = bev.ts_ms;
-                phases_out[4].detail = "PMS_READY";
-                phases_out[5].state = NodeState::Running;
-                phases_out[5].start_ms = bev.ts_ms;
-                phases_out[5].detail = "WAITING AMS_READY";
-            } else if (bev.tag == "boot_progress_ams_ready") {
-                if (phases_out[4].state != NodeState::Done) {
-                    if (phases_out[4].start_ms < 0) phases_out[4].start_ms = bev.ts_ms;
-                    phases_out[4].state = NodeState::Done;
-                    phases_out[4].end_ms = bev.ts_ms;
-                }
-                phases_out[5].state = NodeState::Running;
-                if (phases_out[5].start_ms < 0) phases_out[5].start_ms = bev.ts_ms;
-                phases_out[5].detail = "AMS_READY -> SCREEN";
-            } else if (bev.tag == "boot_progress_enable_screen"
-                    || bev.tag == "sf_stop_bootanim"
-                    || bev.tag == "wm_boot_animation_done") {
-                if (phases_out[5].start_ms < 0) phases_out[5].start_ms = bev.ts_ms;
-                phases_out[5].state = NodeState::Done;
-                phases_out[5].end_ms = bev.ts_ms;
-                phases_out[5].detail = next.label;
-            }
+            advance_phases_for_framework_tag(phases_out, bev.tag.c_str(), next, bev.ts_ms);
             push_replay_tail(bev.ts_ms, "P", TailKind::Stage, next.label);
         }
     }
@@ -577,7 +538,11 @@ void build_replay_snapshot(
             sys_out->mem_line = last_tm->mem_line;
             sys_out->io_line = last_tm->io_line;
             sys_out->top_cpu = last_tm->top_cpu;
+            populate_resource_rows(sys_out, *cpu_pct_out, *io_pct_out, *mem_pct_out);
+        } else {
+            populate_resource_rows(sys_out, -1, -1, -1);
         }
+        apply_trace_kvs(rd, sim_ms, sys_out);
         std::sort(tail_out->begin(), tail_out->end(), [](const TailEntry& a, const TailEntry& b) {
             if (a.ts_ms != b.ts_ms) return a.ts_ms < b.ts_ms;
             return a.seq < b.seq;
@@ -670,6 +635,8 @@ void build_replay_snapshot(
             if (sys_out->top_cpu.size() > 3) sys_out->top_cpu.resize(3);
         }
     }
+    populate_resource_rows(sys_out, *cpu_pct_out, *io_pct_out, *mem_pct_out);
+    apply_trace_kvs(rd, sim_ms, sys_out);
 
     std::sort(tail_out->begin(), tail_out->end(), [](const TailEntry& a, const TailEntry& b) {
         if (a.ts_ms != b.ts_ms) return a.ts_ms < b.ts_ms;

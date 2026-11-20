@@ -59,6 +59,99 @@ StageInfo infer_native_stage(const std::string& apex_state, const std::string& z
     return {1, "EARLY_BOOTANIM", ""};
 }
 
+void advance_phases_for_zygote(PhaseNode* phases, int64_t ts_ms) {
+    if (phases[1].state == NodeState::Running) {
+        phases[1].state = NodeState::Done;
+        phases[1].end_ms = ts_ms;
+        if (phases[2].state == NodeState::Pending) {
+            phases[2].state = NodeState::Running;
+            phases[2].start_ms = ts_ms;
+        }
+    }
+}
+
+void advance_phases_for_framework_tag(
+        PhaseNode* phases, const char* tag, const StageInfo& next, int64_t ts_ms) {
+    if (strcmp(tag, "boot_progress_start") == 0) {
+        if (phases[1].state != NodeState::Done) {
+            phases[1].state = NodeState::Done;
+            if (phases[1].end_ms < 0) phases[1].end_ms = ts_ms;
+        }
+        if (phases[2].start_ms < 0) phases[2].start_ms = 0;
+        phases[2].state = NodeState::Done;
+        phases[2].end_ms = ts_ms;
+        phases[2].detail = "SYSTEM_SERVER STARTED";
+        if (phases[3].state == NodeState::Pending) {
+            phases[3].state = NodeState::Running;
+            phases[3].start_ms = ts_ms;
+            phases[3].detail = "WAITING PRELOAD";
+        }
+    } else if (strcmp(tag, "boot_progress_preload_start") == 0) {
+        phases[3].state = NodeState::Running;
+        phases[3].start_ms = ts_ms;
+        phases[3].detail = "PRELOADING CLASSES";
+    } else if (strcmp(tag, "boot_progress_preload_end") == 0) {
+        if (phases[3].start_ms < 0) phases[3].start_ms = ts_ms;
+        phases[3].state = NodeState::Done;
+        phases[3].end_ms = ts_ms;
+        phases[3].detail = "PRELOADED";
+        if (phases[4].state == NodeState::Pending) {
+            phases[4].state = NodeState::Running;
+            phases[4].start_ms = ts_ms;
+            phases[4].detail = "WAITING SYSTEM_RUN";
+        }
+    } else if (strcmp(tag, "boot_progress_system_run") == 0) {
+        if (phases[3].state != NodeState::Done) {
+            if (phases[3].start_ms < 0) phases[3].start_ms = ts_ms;
+            phases[3].state = NodeState::Done;
+            phases[3].end_ms = ts_ms;
+        }
+        phases[4].state = NodeState::Running;
+        if (phases[4].start_ms < 0) phases[4].start_ms = ts_ms;
+        phases[4].detail = "SYSTEM_RUN";
+    } else if (strcmp(tag, "boot_progress_pms_start") == 0) {
+        phases[4].state = NodeState::Running;
+        if (phases[4].start_ms < 0) phases[4].start_ms = ts_ms;
+        phases[4].detail = "PMS_START";
+    } else if (strcmp(tag, "boot_progress_pms_system_scan_start") == 0) {
+        phases[4].state = NodeState::Running;
+        if (phases[4].start_ms < 0) phases[4].start_ms = ts_ms;
+        phases[4].detail = "SYSTEM_PKG_SCAN";
+    } else if (strcmp(tag, "boot_progress_pms_data_scan_start") == 0) {
+        phases[4].state = NodeState::Running;
+        if (phases[4].start_ms < 0) phases[4].start_ms = ts_ms;
+        phases[4].detail = "DATA_PKG_SCAN";
+    } else if (strcmp(tag, "boot_progress_pms_scan_end") == 0) {
+        phases[4].detail = "SCAN_END";
+    } else if (strcmp(tag, "boot_progress_pms_ready") == 0) {
+        if (phases[4].start_ms < 0) phases[4].start_ms = ts_ms;
+        phases[4].state = NodeState::Done;
+        phases[4].end_ms = ts_ms;
+        phases[4].detail = "PMS_READY";
+        if (phases[5].state == NodeState::Pending) {
+            phases[5].state = NodeState::Running;
+            phases[5].start_ms = ts_ms;
+            phases[5].detail = "WAITING AMS_READY";
+        }
+    } else if (strcmp(tag, "boot_progress_ams_ready") == 0) {
+        if (phases[4].state != NodeState::Done) {
+            if (phases[4].start_ms < 0) phases[4].start_ms = ts_ms;
+            phases[4].state = NodeState::Done;
+            phases[4].end_ms = ts_ms;
+        }
+        phases[5].state = NodeState::Running;
+        if (phases[5].start_ms < 0) phases[5].start_ms = ts_ms;
+        phases[5].detail = "AMS_READY -> SCREEN";
+    } else if (strcmp(tag, "boot_progress_enable_screen") == 0
+            || strcmp(tag, "sf_stop_bootanim") == 0
+            || strcmp(tag, "wm_boot_animation_done") == 0) {
+        if (phases[5].start_ms < 0) phases[5].start_ms = ts_ms;
+        phases[5].state = NodeState::Done;
+        phases[5].end_ms = ts_ms;
+        phases[5].detail = next.label;
+    }
+}
+
 void push_tail(
         EventState* st, int64_t ts_ms, const char* source, TailKind kind,
         const std::string& raw_text, const std::string& group) {
@@ -581,84 +674,7 @@ void* event_reader_thread(void* arg) {
                         {
                             std::lock_guard<std::mutex> lock(st->mu);
                             st->framework_stage = next;
-                            if (strcmp(tag, "boot_progress_start") == 0) {
-                                if (st->phases[1].state != NodeState::Done) {
-                                    st->phases[1].state = NodeState::Done;
-                                    if (st->phases[1].end_ms < 0) st->phases[1].end_ms = ts_ms;
-                                }
-                                if (st->phases[2].start_ms < 0) st->phases[2].start_ms = 0;
-                                st->phases[2].state = NodeState::Done;
-                                st->phases[2].end_ms = ts_ms;
-                                st->phases[2].detail = "SYSTEM_SERVER STARTED";
-                                if (st->phases[3].state == NodeState::Pending) {
-                                    st->phases[3].state = NodeState::Running;
-                                    st->phases[3].start_ms = ts_ms;
-                                    st->phases[3].detail = "WAITING PRELOAD";
-                                }
-                            } else if (strcmp(tag, "boot_progress_preload_start") == 0) {
-                                st->phases[3].state = NodeState::Running;
-                                st->phases[3].start_ms = ts_ms;
-                                st->phases[3].detail = "PRELOADING CLASSES";
-                            } else if (strcmp(tag, "boot_progress_preload_end") == 0) {
-                                if (st->phases[3].start_ms < 0) st->phases[3].start_ms = ts_ms;
-                                st->phases[3].state = NodeState::Done;
-                                st->phases[3].end_ms = ts_ms;
-                                st->phases[3].detail = "PRELOADED";
-                                if (st->phases[4].state == NodeState::Pending) {
-                                    st->phases[4].state = NodeState::Running;
-                                    st->phases[4].start_ms = ts_ms;
-                                    st->phases[4].detail = "WAITING SYSTEM_RUN";
-                                }
-                            } else if (strcmp(tag, "boot_progress_system_run") == 0) {
-                                if (st->phases[3].state != NodeState::Done) {
-                                    if (st->phases[3].start_ms < 0) st->phases[3].start_ms = ts_ms;
-                                    st->phases[3].state = NodeState::Done;
-                                    st->phases[3].end_ms = ts_ms;
-                                }
-                                st->phases[4].state = NodeState::Running;
-                                if (st->phases[4].start_ms < 0) st->phases[4].start_ms = ts_ms;
-                                st->phases[4].detail = "SYSTEM_RUN";
-                            } else if (strcmp(tag, "boot_progress_pms_start") == 0) {
-                                st->phases[4].state = NodeState::Running;
-                                if (st->phases[4].start_ms < 0) st->phases[4].start_ms = ts_ms;
-                                st->phases[4].detail = "PMS_START";
-                            } else if (strcmp(tag, "boot_progress_pms_system_scan_start") == 0) {
-                                st->phases[4].state = NodeState::Running;
-                                if (st->phases[4].start_ms < 0) st->phases[4].start_ms = ts_ms;
-                                st->phases[4].detail = "SYSTEM_PKG_SCAN";
-                            } else if (strcmp(tag, "boot_progress_pms_data_scan_start") == 0) {
-                                st->phases[4].state = NodeState::Running;
-                                if (st->phases[4].start_ms < 0) st->phases[4].start_ms = ts_ms;
-                                st->phases[4].detail = "DATA_PKG_SCAN";
-                            } else if (strcmp(tag, "boot_progress_pms_scan_end") == 0) {
-                                st->phases[4].detail = "SCAN_END";
-                            } else if (strcmp(tag, "boot_progress_pms_ready") == 0) {
-                                if (st->phases[4].start_ms < 0) st->phases[4].start_ms = ts_ms;
-                                st->phases[4].state = NodeState::Done;
-                                st->phases[4].end_ms = ts_ms;
-                                st->phases[4].detail = "PMS_READY";
-                                if (st->phases[5].state == NodeState::Pending) {
-                                    st->phases[5].state = NodeState::Running;
-                                    st->phases[5].start_ms = ts_ms;
-                                    st->phases[5].detail = "WAITING AMS_READY";
-                                }
-                            } else if (strcmp(tag, "boot_progress_ams_ready") == 0) {
-                                if (st->phases[4].state != NodeState::Done) {
-                                    if (st->phases[4].start_ms < 0) st->phases[4].start_ms = ts_ms;
-                                    st->phases[4].state = NodeState::Done;
-                                    st->phases[4].end_ms = ts_ms;
-                                }
-                                st->phases[5].state = NodeState::Running;
-                                if (st->phases[5].start_ms < 0) st->phases[5].start_ms = ts_ms;
-                                st->phases[5].detail = "AMS_READY -> SCREEN";
-                            } else if (strcmp(tag, "boot_progress_enable_screen") == 0
-                                    || strcmp(tag, "sf_stop_bootanim") == 0
-                                    || strcmp(tag, "wm_boot_animation_done") == 0) {
-                                if (st->phases[5].start_ms < 0) st->phases[5].start_ms = ts_ms;
-                                st->phases[5].state = NodeState::Done;
-                                st->phases[5].end_ms = ts_ms;
-                                st->phases[5].detail = next.label;
-                            }
+                            advance_phases_for_framework_tag(st->phases, tag, next, ts_ms);
                         }
                         push_tail(st, ts_ms, "P", TailKind::Stage, next.label);
                     }

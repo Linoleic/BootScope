@@ -3,12 +3,14 @@
 
 #include <stdio.h>
 #include <mutex>
+#include <unordered_map>
 
 namespace bootscope {
 
 static std::mutex g_trace_mu;
 static FILE* g_trace_fp = nullptr;
 static size_t g_trace_bytes = 0;
+static std::unordered_map<std::string, std::string> g_last_kv;
 constexpr size_t kMaxTraceBytes = 512 * 1024;
 
 static std::string clean_tsv_field(const std::string& s) {
@@ -35,6 +37,7 @@ void trace_open() {
     if (g_trace_fp) return;
     g_trace_fp = fopen(kEarlyTracePath, "w");
     g_trace_bytes = 0;
+    g_last_kv.clear();
     if (g_trace_fp) {
         setvbuf(g_trace_fp, nullptr, _IOLBF, 0);
         const char* hdr = "# ts_ms\ttype\tfields...\n";
@@ -88,6 +91,20 @@ void trace_tail(int64_t ts_ms, const char* source, const char* kind, const std::
     if (!trace_is_open()) return;
     std::string line = std::to_string(ts_ms) + "\tTAIL\t" + source + "\t" + kind
         + "\t" + clean_tsv_field(text);
+    write_trace_line(line);
+}
+
+void trace_kv(int64_t ts_ms, const std::string& key, const std::string& text, bool alert) {
+    if (!trace_is_open() || key.empty()) return;
+    std::string val_token = std::string(alert ? "1\t" : "0\t") + clean_tsv_field(text);
+    {
+        std::lock_guard<std::mutex> lock(g_trace_mu);
+        auto it = g_last_kv.find(key);
+        if (it != g_last_kv.end() && it->second == val_token) return;
+        g_last_kv[key] = val_token;
+    }
+    std::string line = std::to_string(ts_ms) + "\tKV\t" + clean_tsv_field(key)
+        + "\t" + clean_tsv_field(text) + "\t" + (alert ? "1" : "0");
     write_trace_line(line);
 }
 

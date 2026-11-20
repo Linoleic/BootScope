@@ -113,6 +113,16 @@ void draw_resources_block(
         uint32_t* px, int stride, int rx0, int rx1, int ry, size_t rchars, const RenderContext& ctx) {
     fill_rect(px, stride, rx0, ry, rx1, ry + 2, kColorTrack);
     draw_text(px, stride, "RESOURCES", rx0, ry + 8, 2, kColorAccent);
+    if (!ctx.sys->rows.empty()) {
+        for (size_t i = 0; i < ctx.sys->rows.size() && i < 4; i++) {
+            const MetricRow& r = ctx.sys->rows[i];
+            std::string line = r.text;
+            if (line.size() > rchars) line.resize(rchars);
+            uint32_t col = r.alert ? kColorError : (i == 2 ? kColorMuted : kColorPrimary);
+            draw_text(px, stride, line.c_str(), rx0, ry + 29 + (int)i * 21, 2, col);
+        }
+        return;
+    }
     std::string psi_str = ctx.psi_compact.empty() ? "PSI N/A" : ctx.psi_compact;
     uint32_t psi_col = (ctx.io_pct >= 30 || ctx.cpu_pct >= 65) ? kColorError : kColorPrimary;
     std::string line_a = psi_str + "  " + ctx.sys->freq_line;
@@ -377,6 +387,7 @@ int main(int argc, char** argv) {
 
     bool preview = false;
     bool replay_mode = false;
+    bool replay_pre_sf = false;
     std::string replay_dir;
     float replay_speed = 1.0f;
     for (int i = 1; i < argc; i++) {
@@ -385,6 +396,8 @@ int main(int argc, char** argv) {
             replay_mode = true;
             preview = true;
             replay_dir = argv[++i];
+        } else if (strcmp(argv[i], "--pre-sf") == 0) {
+            replay_pre_sf = true;
         } else if (strcmp(argv[i], "--speed") == 0 && i + 1 < argc) {
             float sp = (float)atof(argv[++i]);
             if (sp >= 0.25f && sp <= 10.0f) replay_speed = sp;
@@ -513,14 +526,7 @@ int main(int argc, char** argv) {
             pre_svcs[9] = "-";
             if (pre_svcs[2] == "RUN") {
                 std::lock_guard<std::mutex> lock(ev_state.mu);
-                if (ev_state.phases[1].state == NodeState::Running) {
-                    ev_state.phases[1].state = NodeState::Done;
-                    ev_state.phases[1].end_ms = t_ms;
-                    if (ev_state.phases[2].state == NodeState::Pending) {
-                        ev_state.phases[2].state = NodeState::Running;
-                        ev_state.phases[2].start_ms = t_ms;
-                    }
-                }
+                advance_phases_for_zygote(ev_state.phases, t_ms);
             }
             if ((sf_wait_tick % 5) == 0 || pre_changed) {
                 PsiSample cur_psi[3];
@@ -534,7 +540,9 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < 3; i++) prev_psi[i] = cur_psi[i];
                 prev_psi_ms = t_ms;
                 sys_metrics = collect_sys_metrics(t_ms, &sys_state);
+                populate_resource_rows(&sys_metrics, c_pct, i_pct, m_pct);
                 trace_metric(t_ms, c_pct, i_pct, m_pct, sys_metrics, pre_svcs, kSvcCount);
+                for (const auto& r : sys_metrics.rows) trace_kv(t_ms, r.key, r.text, r.alert);
             }
         }
         sf_wait_tick++;
@@ -642,7 +650,8 @@ int main(int argc, char** argv) {
 
         int64_t now_ms = boottime_ms();
         if (replay_mode) {
-            int64_t step_ms = replay_data.start_ms + (int64_t)llround((double)frame_idx * 250.0 * (double)replay_speed);
+            int64_t base_ms = replay_pre_sf ? replay_data.pre_start_ms : replay_data.start_ms;
+            int64_t step_ms = base_ms + (int64_t)llround((double)frame_idx * 250.0 * (double)replay_speed);
             if (step_ms >= replay_data.end_ms) {
                 now_ms = replay_data.end_ms;
                 replay_finished = true;
@@ -711,17 +720,11 @@ int main(int argc, char** argv) {
             if ((frame_idx % 2) == 0) {
                 sys_metrics = collect_sys_metrics(now_ms, &sys_state);
             }
+            populate_resource_rows(&sys_metrics, cpu_pct, io_pct, mem_pct);
 
             {
                 std::lock_guard<std::mutex> lock(ev_state.mu);
-                if (cur_states[2] == "RUN" && ev_state.phases[1].state == NodeState::Running) {
-                    ev_state.phases[1].state = NodeState::Done;
-                    ev_state.phases[1].end_ms = now_ms;
-                    if (ev_state.phases[2].state == NodeState::Pending) {
-                        ev_state.phases[2].state = NodeState::Running;
-                        ev_state.phases[2].start_ms = now_ms;
-                    }
-                }
+                if (cur_states[2] == "RUN") advance_phases_for_zygote(ev_state.phases, now_ms);
                 if (!ev_state.last_init_action.empty() || !ev_state.max_init_svc.empty()) {
                     std::string init_det;
                     if (!ev_state.last_init_action.empty()) {
@@ -909,6 +912,7 @@ int main(int argc, char** argv) {
             if (svc_changed || (frame_idx % 2) == 0) {
                 trace_metric(now_ms, cpu_pct, io_pct, mem_pct, sys_metrics, cur_states, kSvcCount);
             }
+            for (const auto& r : sys_metrics.rows) trace_kv(now_ms, r.key, r.text, r.alert);
             for (int i = 0; i < 6; i++) {
                 bool changed = !has_traced_phases
                     || prev_traced_phases[i].state != phases_snap[i].state

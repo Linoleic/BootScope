@@ -26,6 +26,12 @@ struct TopProc {
     double pct = 0.0;
 };
 
+struct MetricRow {
+    std::string key;
+    std::string text;
+    bool alert = false;
+};
+
 struct SysMetrics {
     std::string freq_line = "FREQ N/A";
     std::string mem_line = "MEM N/A";
@@ -33,6 +39,7 @@ struct SysMetrics {
     bool io_busy = false;
     bool mem_low = false;
     std::vector<TopProc> top_cpu;
+    std::vector<MetricRow> rows;
 };
 
 struct SysSampleState {
@@ -47,5 +54,6 @@ bool read_psi_file(const char* path, PsiSample* out);
 int compute_psi_pct(const PsiSample& cur, const PsiSample& prev, int64_t dt_ms);
 DeviceInfo collect_device_info(const RuleSet& rules);
 SysMetrics collect_sys_metrics(int64_t now_ms, SysSampleState* st);
+void populate_resource_rows(SysMetrics* m, int cpu_pct, int io_pct, int mem_pct);
 
 }  // namespace bootscope

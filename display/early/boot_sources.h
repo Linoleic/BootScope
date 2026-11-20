@@ -85,6 +85,9 @@ struct EventState {
 
 bool map_framework_stage(const char* tag, const char* ms, StageInfo* out);
 StageInfo infer_native_stage(const std::string& apex_state, const std::string& zyg_state);
+void advance_phases_for_zygote(PhaseNode* phases, int64_t ts_ms);
+void advance_phases_for_framework_tag(
+    PhaseNode* phases, const char* tag, const StageInfo& next, int64_t ts_ms);
 
 void push_tail(
     EventState* st, int64_t ts_ms, const char* source, TailKind kind,
