@@ -133,7 +133,7 @@ DeviceInfo collect_device_info(const RuleSet& rules) {
         if (dash != std::string::npos) krn.resize(dash);
     }
 
-    std::string raw2 = abi.empty() ? "ARM64" : abi;
+    std::string raw2 = (abi.empty() || abi == "arm64-v8a") ? "ARM64" : abi;
     if (cores > 0) raw2 += " " + std::to_string(cores) + "C";
     if (ram_gb > 0) raw2 += " " + std::to_string(ram_gb) + "G";
     if (!krn.empty()) raw2 += " KRN " + krn;

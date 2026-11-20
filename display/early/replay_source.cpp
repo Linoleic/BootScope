@@ -214,6 +214,7 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
             }
             if (cols.size() < 3) continue;
             int64_t ts_ms = strtoll(cols[0].c_str(), nullptr, 10);
+            if (ts_ms < 0 || ts_ms > 300000) continue;
             if (ts_ms / 1000.0 > max_sec) max_sec = ts_ms / 1000.0;
             const std::string& rtype = cols[1];
             if (rtype == "BL" && cols.size() >= 4) {
@@ -265,6 +266,10 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
             }
         }
         fclose(f);
+        std::sort(out->trace_tails.begin(), out->trace_tails.end(),
+                  [](const ReplayTraceTail& a, const ReplayTraceTail& b) { return a.ts_ms < b.ts_ms; });
+        std::sort(out->trace_metrics.begin(), out->trace_metrics.end(),
+                  [](const ReplayTraceMetric& a, const ReplayTraceMetric& b) { return a.ts_ms < b.ts_ms; });
         out->has_trace = !out->trace_tails.empty() || !out->trace_metrics.empty();
     }
 
@@ -415,18 +420,33 @@ void build_replay_snapshot(
     }
 
     if (rd.has_trace && !rd.trace_tails.empty()) {
-        tail_out->clear();
-        uint64_t tseq = 1;
+        std::vector<TailEntry> merged;
+        // Preserve synthesized framework P events in case trace hit cap or missed them.
+        for (const auto& e : *tail_out) {
+            if (e.source == "P") merged.push_back(e);
+        }
+        uint64_t tseq = 1000;
         for (const auto& tt : rd.trace_tails) {
             if (tt.ts_ms > sim_ms) break;
+            bool dup = false;
+            for (auto it = merged.rbegin(); it != merged.rend(); ++it) {
+                if (it->source == tt.source && it->text == tt.text) {
+                    if (tt.kind == TailKind::Stage || (tt.ts_ms - it->ts_ms) < 2000) {
+                        dup = true;
+                    }
+                    break;
+                }
+            }
+            if (dup) continue;
             TailEntry e;
             e.ts_ms = tt.ts_ms;
             e.seq = tseq++;
             e.source = tt.source;
             e.text = tt.text;
             e.kind = tt.kind;
-            tail_out->push_back(std::move(e));
+            merged.push_back(std::move(e));
         }
+        *tail_out = std::move(merged);
     }
 
     if (rd.has_trace && !rd.trace_metrics.empty()) {

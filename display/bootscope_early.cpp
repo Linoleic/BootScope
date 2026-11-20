@@ -193,7 +193,7 @@ void draw_dashboard(uint32_t* px, int stride, const RenderContext& ctx) {
     draw_text(px, stride, d2.c_str(), 24, 70, 2, kColorMuted);
 
     char meta_buf[48];
-    snprintf(meta_buf, sizeof(meta_buf), "UPTIME %-7.2fS  STAGE %d/%d", ctx.uptime_s, ctx.stage->step, kStageTotal);
+    snprintf(meta_buf, sizeof(meta_buf), "UPTIME %.2fS  STG %d/%d", ctx.uptime_s, ctx.stage->step, kStageTotal);
     draw_text(px, stride, meta_buf, 24, 92, 3, kColorPrimary);
 
     const int bar_top = 122, bar_bottom = 136;

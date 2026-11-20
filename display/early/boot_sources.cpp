@@ -69,14 +69,15 @@ void push_tail(
     if (kind == TailKind::Stage) kind_str = "STAGE";
     else if (kind == TailKind::Error) kind_str = "ERR";
     else if (kind == TailKind::ModuleError) kind_str = "MERR";
-    trace_tail(ts_ms, source, kind_str, text);
 
     std::lock_guard<std::mutex> lock(st->mu);
     for (auto& existing : st->tail) {
         bool same_msg = (existing.source == source && existing.text == text);
         bool same_err_tag = (!group.empty() && existing.source == source && existing.group == group);
         if (same_msg || same_err_tag) {
+            bool emit_trace = (kind != TailKind::Stage) && (ts_ms - existing.ts_ms >= 2000);
             if (ts_ms >= existing.ts_ms) {
+                if (emit_trace) trace_tail(ts_ms, source, kind_str, text);
                 existing.ts_ms = ts_ms;
                 existing.text = std::move(text);
                 existing.kind = kind;
@@ -89,6 +90,7 @@ void push_tail(
             return;
         }
     }
+    trace_tail(ts_ms, source, kind_str, text);
     TailEntry entry;
     entry.ts_ms = ts_ms;
     entry.seq = st->next_seq++;
@@ -491,7 +493,9 @@ void* err_reader_thread(void* arg) {
                     std::string tag_str(tag);
                     while (!tag_str.empty() && tag_str.back() == ' ') tag_str.pop_back();
                     std::string full = tag_str + ": " + msg;
-                    int64_t ts_ms = (int64_t)llround(sec * 1000.0);
+                    int64_t ts_ms = (sec < 0.0 || sec > 86400.0)
+                        ? boottime_ms()
+                        : (int64_t)llround(sec * 1000.0);
                     if (matches_module_key(st->rules, tag_str) || matches_module_key(st->rules, msg)) {
                         push_tail(st, ts_ms, "M", TailKind::ModuleError, "ERR " + full, "MOD:" + tag_str);
                     } else if (!matches_ignore_tag(st->rules, tag_str)) {
