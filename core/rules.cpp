@@ -142,4 +142,25 @@ std::string sanitize_tail_text(const RuleSet& rules, const std::string& raw, siz
     return out;
 }
 
+std::string sanitize_trace_text(const RuleSet& rules, const std::string& raw, size_t max_len) {
+    if (raw.empty() || max_len == 0 || has_sensitive_marker(rules, raw)) return "";
+    std::string out;
+    out.reserve(std::min(raw.size(), max_len));
+    bool prev_space = true;
+    for (unsigned char uc : raw) {
+        if (uc == ' ' || uc == '\t' || uc == '\r' || uc == '\n') {
+            if (!prev_space) {
+                out.push_back(' ');
+                prev_space = true;
+            }
+        } else if (uc >= 0x20 && uc <= 0x7E) {
+            out.push_back((char)uc);
+            prev_space = false;
+        }
+        if (out.size() >= max_len) break;
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
 }  // namespace bootscope

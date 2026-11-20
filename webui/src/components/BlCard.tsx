@@ -13,7 +13,7 @@ export function BlCard({ bl }: { bl: BootloaderDetail }) {
         <h2>Bootloader 分段详情</h2>
         <span class="pill mono">{bl.source || 'NONE'}</span>
       </div>
-      <div class="sub mono" style="margin-bottom:8px">
+      <div class="sub mono bl-meta">
         {bl.meta || `硬件总耗时 ${fmtMs(bl.total_ms)}`}
         {bl.wait_ms > 0 ? ` · 解锁警告等待 ${fmtMs(bl.wait_ms)}（不计入硬件耗时）` : ''}
       </div>
@@ -52,8 +52,8 @@ export function BlCard({ bl }: { bl: BootloaderDetail }) {
                 {bl.stages.map((s) => (
                   <tr key={`${s.id}-${s.start_ms}`}>
                     <td class="mono">{s.id}{s.wait_only ? ' (等待)' : ''}</td>
-                    <td class="mono">{s.start_ms} ms</td>
-                    <td class="mono">{s.dur_ms} ms</td>
+                    <td class="mono">{s.start_ms}ms</td>
+                    <td class="mono">{s.dur_ms}ms</td>
                     <td class="mono">{s.detail}</td>
                   </tr>
                 ))}

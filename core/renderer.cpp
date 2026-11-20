@@ -16,6 +16,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -1028,6 +1029,16 @@ int run_display(const DisplayOptions& opts, int argc, char** argv) {
     }
     int64_t rel_ms = boottime_ms();
     fprintf(logf, "released_ms=%lld\n", (long long)rel_ms);
+    struct rusage ru {};
+    if (getrusage(RUSAGE_SELF, &ru) == 0) {
+        int64_t user_ms = (int64_t)ru.ru_utime.tv_sec * 1000LL + (int64_t)ru.ru_utime.tv_usec / 1000LL;
+        int64_t sys_ms = (int64_t)ru.ru_stime.tv_sec * 1000LL + (int64_t)ru.ru_stime.tv_usec / 1000LL;
+        fprintf(logf, "self_cpu_ms=%lld\n", (long long)(user_ms + sys_ms));
+        fprintf(logf, "self_user_ms=%lld\n", (long long)user_ms);
+        fprintf(logf, "self_sys_ms=%lld\n", (long long)sys_ms);
+        fprintf(logf, "self_rss_kb=%lld\n", (long long)ru.ru_maxrss);
+    }
+    fprintf(logf, "frames=%d\n", frame_idx);
     trace_life(rel_ms, "released");
     trace_close();
     if (!preview) {

@@ -95,30 +95,33 @@ export function SettingsView(props: Props) {
           />
         </label>
 
-        <div class="inline-row" style="justify-content:space-between">
-          <div class="inline-row">
-            <span class="sub">自动保留最近</span>
-            <input
-              type="number"
-              class="input mono"
-              style="width:76px"
-              min="1"
-              max="200"
-              value={maxHistory}
-              onInput={(e) => setMaxHistory((e.target as HTMLInputElement).value)}
-            />
-            <span class="sub">次启动（当前 {props.totalRuns} 条 · {(props.diskKb / 1024).toFixed(2)} MB）</span>
+        <div class="retention-block">
+          <div class="retention-row">
+            <div class="retention-input-group">
+              <span class="sub">自动保留最近</span>
+              <input
+                type="number"
+                class="input mono"
+                style="width:76px"
+                min="1"
+                max="200"
+                value={maxHistory}
+                onInput={(e) => setMaxHistory((e.target as HTMLInputElement).value)}
+              />
+              <span class="sub">次</span>
+            </div>
+            <div class="inline-row">
+              <button type="button" class="btn" onClick={saveRetention}>保存上限</button>
+              <button type="button" class="btn danger-soft" onClick={runPruneNow}>立即清理</button>
+            </div>
           </div>
-          <div class="inline-row">
-            <button type="button" class="btn" onClick={saveRetention}>保存上限</button>
-            <button type="button" class="btn danger-soft" onClick={runPruneNow}>立即清理</button>
-          </div>
+          <div class="sub mono">当前 {props.totalRuns} 条 · {(props.diskKb / 1024).toFixed(2)} MB</div>
         </div>
       </section>
 
       <section class="card">
         <div class="card-head">
-          <h2>过滤与脱敏规则 (`rules.conf`)</h2>
+          <h2>过滤与脱敏规则 (rules.conf)</h2>
           <span class="pill mono">SOURCE: {rulesSource}</span>
         </div>
         <textarea

@@ -24,5 +24,6 @@ bool matches_ignore_cmd(const RuleSet& rules, const std::string& full_cmd);
 bool matches_ignore_svc(const RuleSet& rules, const std::string& svc);
 bool matches_ignore_tag(const RuleSet& rules, const std::string& tag);
 std::string sanitize_tail_text(const RuleSet& rules, const std::string& raw, size_t max_len);
+std::string sanitize_trace_text(const RuleSet& rules, const std::string& raw, size_t max_len);
 
 }  // namespace bootscope

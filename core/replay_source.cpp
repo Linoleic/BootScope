@@ -209,7 +209,7 @@ bool load_replay_data(const std::string& dir, ReplayData* out) {
     }
 
     if (FILE* f = fopen(join_path(dir, "early-trace.tsv").c_str(), "r")) {
-        char line[1024];
+        char line[2048];
         while (fgets(line, sizeof(line), f)) {
             if (line[0] == '#') continue;
             std::string s(line);
@@ -678,9 +678,11 @@ void build_replay_snapshot(
         uint64_t tseq = 1000;
         for (const auto& tt : rd.trace_tails) {
             if (tt.ts_ms > sim_ms) break;
+            std::string hud_text = sanitize_tail_text(rules, tt.text, kTailLineChars - 8);
+            if (hud_text.empty()) continue;
             bool dup = false;
             for (auto it = merged.rbegin(); it != merged.rend(); ++it) {
-                if (it->source == tt.source && it->text == tt.text) {
+                if (it->source == tt.source && it->text == hud_text) {
                     if (tt.kind == TailKind::Stage || (tt.ts_ms - it->ts_ms) < 2000) {
                         dup = true;
                     }
@@ -692,7 +694,7 @@ void build_replay_snapshot(
             e.ts_ms = tt.ts_ms;
             e.seq = tseq++;
             e.source = tt.source;
-            e.text = tt.text;
+            e.text = std::move(hud_text);
             e.kind = tt.kind;
             merged.push_back(std::move(e));
         }

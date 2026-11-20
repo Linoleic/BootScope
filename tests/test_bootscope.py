@@ -399,6 +399,8 @@ class PackagingAndModuleTests(unittest.TestCase):
             'parse_mtk_bootprof_file', '__system_property_foreach', 'cmd_list_json',
             'cmd_inspect_json', 'cmd_compare_json', 'cmd_rules_set_json',
             'BOOTSCOPE / BOOTLOADER', 'ro.surface_flinger.primary_display_orientation', 'rot_quad',
+            'sanitize_trace_text', 'errors_total', 'getrusage', 'self_cpu_ms', 'self_rss_kb',
+            'bootscope_early',
         ):
             self.assertIn(marker, core_cpp)
         self.assertFalse((ROOT / 'display').exists())
@@ -408,6 +410,8 @@ class PackagingAndModuleTests(unittest.TestCase):
 
         web_pkg = (ROOT / 'webui' / 'package.json').read_text(encoding='utf-8')
         web_bridge = (ROOT / 'webui' / 'src' / 'bridge.ts').read_text(encoding='utf-8')
+        web_css = (ROOT / 'webui' / 'src' / 'styles.css').read_text(encoding='utf-8')
+        web_app = (ROOT / 'webui' / 'src' / 'App.tsx').read_text(encoding='utf-8')
         self.assertIn('"preact"', web_pkg)
         self.assertIn('"vite"', web_pkg)
         self.assertIn('window.ksu', web_bridge)
@@ -416,6 +420,24 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('list-json', web_bridge)
         self.assertIn('inspect-json', web_bridge)
         self.assertIn('compare-json', web_bridge)
+        self.assertIn('grid-template-columns: minmax(0, 1fr)', web_css)
+        self.assertNotIn('grid-template-columns: 1fr;', web_css)
+        for css_tok in (
+            'overflow-x: clip', '-webkit-text-size-adjust: 100%', '.log-scroll',
+            'width: max-content', 'overscroll-behavior-x: contain',
+        ):
+            self.assertIn(css_tok, web_css)
+        for app_tok in ('log-scroll', 'kv-scroll', 'is-hidden'):
+            self.assertIn(app_tok, web_app)
+        self.assertNotIn('scroll-hint', web_app)
+        self.assertNotIn('左右滑动', web_app)
+        web_run_select = (ROOT / 'webui' / 'src' / 'components' / 'RunSelect.tsx').read_text(encoding='utf-8')
+        web_replay_bar = (ROOT / 'webui' / 'src' / 'components' / 'ReplayBar.tsx').read_text(encoding='utf-8')
+        web_compare = (ROOT / 'webui' / 'src' / 'components' / 'CompareView.tsx').read_text(encoding='utf-8')
+        self.assertIn('role="combobox"', web_run_select)
+        self.assertIn('role="listbox"', web_run_select)
+        self.assertNotIn('<select', web_replay_bar)
+        self.assertNotIn('<select', web_compare)
 
     def test_build_module_ndk_resolution(self):
         with tempfile.TemporaryDirectory() as tmp:

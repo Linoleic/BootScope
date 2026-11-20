@@ -13,7 +13,7 @@ static FILE* g_trace_fp = nullptr;
 static size_t g_trace_bytes = 0;
 static std::unordered_map<std::string, std::string> g_last_kv;
 static std::string g_last_bl_sig;
-constexpr size_t kMaxTraceBytes = 512 * 1024;
+constexpr size_t kMaxTraceBytes = 2 * 1024 * 1024;
 
 static std::string clean_tsv_field(const std::string& s) {
     std::string out;

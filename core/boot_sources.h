@@ -80,7 +80,8 @@ void advance_phases_for_framework_tag(
 
 void push_tail(
     EventState* st, int64_t ts_ms, const char* source, TailKind kind,
-    const std::string& raw_text, const std::string& group = "");
+    const std::string& raw_text, const std::string& group = "",
+    const std::string& full_trace_raw = "");
 
 bool is_resident_daemon(const std::string& svc);
 bool is_stack_trace_noise(const char* msg);

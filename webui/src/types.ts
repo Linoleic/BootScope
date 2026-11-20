@@ -120,6 +120,9 @@ export interface InspectResponse {
     released_ms: number;
     layout: string;
     exit: string;
+    self_cpu_ms?: number;
+    self_rss_kb?: number;
+    frames?: number;
   };
   bootloader: BootloaderDetail;
   phases: PhaseInfo[];
@@ -128,6 +131,7 @@ export interface InspectResponse {
   boot_events: BootEvent[];
   psi_series: PsiPoint[];
   top_cpu: TopCpuProc[];
+  errors_total?: number;
   errors: TraceError[];
 }
 

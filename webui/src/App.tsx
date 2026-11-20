@@ -23,9 +23,14 @@ type Tab = 'overview' | 'compare' | 'settings';
 
 export function App() {
   const [tab, setTab] = useState<Tab>('overview');
+  const [visited, setVisited] = useState<{ compare: boolean; settings: boolean }>({
+    compare: false,
+    settings: false,
+  });
   const [listData, setListData] = useState<ListResponse | null>(null);
   const [selectedId, setSelectedId] = useState<string>('');
   const [inspectData, setInspectData] = useState<InspectResponse | null>(null);
+  const [refreshSeq, setRefreshSeq] = useState<number>(0);
   const [includeBl, setIncludeBl] = useState<boolean>(true);
   const [includePreSf, setIncludePreSf] = useState<boolean>(true);
   const [speed, setSpeed] = useState<ReplaySpeed>('2');
@@ -37,6 +42,13 @@ export function App() {
     setStatusMsg(msg);
     setStatusErr(err);
   };
+
+  function switchTab(next: Tab) {
+    setTab(next);
+    if (next !== 'overview') {
+      setVisited((prev) => (prev[next] ? prev : { ...prev, [next]: true }));
+    }
+  }
 
   async function reloadList(preferredId?: string) {
     try {
@@ -54,6 +66,7 @@ export function App() {
       } else {
         setInspectData(null);
       }
+      setRefreshSeq((n) => n + 1);
       setStatus(`已加载 ${data.total_runs} 条启动记录`);
     } catch (e) {
       setStatus(`加载失败: ${(e as Error).message}`, true);
@@ -129,26 +142,26 @@ export function App() {
 
       {!hasKsuBridge() && (
         <div class="banner">
-          未检测到 KernelSU `window.ksu` 桥接，当前处于桌面模拟数据预览模式。
+          未检测到 KernelSU <code>window.ksu</code> 桥接，当前处于桌面模拟数据预览模式。
         </div>
       )}
 
       <nav class="tabs">
-        <button type="button" class={`tab-btn ${tab === 'overview' ? 'active' : ''}`} onClick={() => setTab('overview')}>
+        <button type="button" class={`tab-btn ${tab === 'overview' ? 'active' : ''}`} onClick={() => switchTab('overview')}>
           总览与时间轴
         </button>
-        <button type="button" class={`tab-btn ${tab === 'compare' ? 'active' : ''}`} onClick={() => setTab('compare')}>
+        <button type="button" class={`tab-btn ${tab === 'compare' ? 'active' : ''}`} onClick={() => switchTab('compare')}>
           A/B 对比
         </button>
-        <button type="button" class={`tab-btn ${tab === 'settings' ? 'active' : ''}`} onClick={() => setTab('settings')}>
+        <button type="button" class={`tab-btn ${tab === 'settings' ? 'active' : ''}`} onClick={() => switchTab('settings')}>
           配置与规则
         </button>
       </nav>
 
-      {statusMsg && <p class={`status-line mono ${statusErr ? 'err' : ''}`}>{statusMsg}</p>}
+      <p class={`status-line mono ${statusErr ? 'err' : ''}`}>{statusMsg || '\u00a0'}</p>
 
-      {tab === 'overview' && listData && (
-        <>
+      {listData && (
+        <div class={`tab-pane ${tab === 'overview' ? '' : 'is-hidden'}`}>
           <ReplayBar
             runs={listData.runs}
             selectedId={selectedId}
@@ -168,25 +181,30 @@ export function App() {
             <>
               <section class="summary-grid">
                 <article class="stat-card">
-                  <div class="stat-k">硬件 BL 耗时</div>
+                  <div class="stat-k">BL 耗时</div>
                   <div class="stat-v mono">{fmtMs(inspectData.bootloader.total_ms)}</div>
                   <div class="stat-s mono">
-                    src={inspectData.bootloader.source}
-                    {inspectData.bootloader.wait_ms > 0 ? ` · wait=${fmtMs(inspectData.bootloader.wait_ms)}` : ''}
+                    {inspectData.bootloader.source}
+                    {inspectData.bootloader.wait_ms > 0 ? ` · 等 ${fmtMs(inspectData.bootloader.wait_ms)}` : ''}
                   </div>
                 </article>
                 <article class="stat-card">
-                  <div class="stat-k">浮层首帧时刻</div>
+                  <div class="stat-k">浮层首帧</div>
                   <div class="stat-v mono">{fmtMs(inspectData.display.first_frame_ms)}</div>
                   <div class="stat-s mono">
-                    mode={inspectData.display.mode} · rel={fmtMs(inspectData.display.released_ms)}
+                    {(inspectData.display.self_cpu_ms ?? -1) >= 0
+                      ? `自耗 ${inspectData.display.self_cpu_ms}ms${(inspectData.display.self_rss_kb ?? 0) > 0 ? ` · ${(inspectData.display.self_rss_kb! / 1024).toFixed(1)}MB` : ''}`
+                      : `${inspectData.display.mode} · 退 ${fmtMs(inspectData.display.released_ms)}`}
                   </div>
                 </article>
                 <article class="stat-card">
-                  <div class="stat-k">系统启动完成</div>
+                  <div class="stat-k">启动完成</div>
                   <div class="stat-v mono">{fmtMs(bootDone)}</div>
                   <div class="stat-s mono">
-                    boot_completed={inspectData.metadata.boot_completed || '?'} · {inspectData.metadata.bootreason || '-'}
+                    {inspectData.metadata.boot_completed === '1'
+                      ? '已完成'
+                      : `状态=${inspectData.metadata.boot_completed || '?'}`}
+                    {inspectData.metadata.bootreason ? ` · ${inspectData.metadata.bootreason}` : ''}
                   </div>
                 </article>
               </section>
@@ -199,22 +217,27 @@ export function App() {
                   <div class="card-head">
                     <h2>关键路径与框架事件</h2>
                   </div>
-                  <div class="kv-list mono">
+                  <div class="phase-list mono">
                     {inspectData.phases.map((p) => (
-                      <div key={p.id} class="kv-row">
-                        <span class="k">{p.id} · {p.detail}</span>
-                        <span class="v">{p.dur_ms >= 0 ? fmtMs(p.dur_ms) : p.state.toUpperCase()}</span>
+                      <div key={p.id} class="phase-row">
+                        <div class="phase-top">
+                          <span class="phase-id">{p.id}</span>
+                          <span class="phase-dur">{p.dur_ms >= 0 ? fmtMs(p.dur_ms) : p.state.toUpperCase()}</span>
+                        </div>
+                        <div class="phase-detail">{p.detail || '-'}</div>
                       </div>
                     ))}
                   </div>
                   <h3>Framework 事件</h3>
-                  <div class="kv-list mono">
-                    {inspectData.boot_events.map((b) => (
-                      <div key={b.tag} class="kv-row">
-                        <span class="k">{b.tag}</span>
-                        <span class="v">{b.ms} ms</span>
-                      </div>
-                    ))}
+                  <div class="kv-scroll">
+                    <div class="kv-scroll-inner mono">
+                      {inspectData.boot_events.map((b) => (
+                        <div key={b.tag} class="kv-row">
+                          <span class="k">{b.tag}</span>
+                          <span class="v">{b.ms}ms</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 </article>
 
@@ -222,45 +245,66 @@ export function App() {
                   <div class="card-head">
                     <h2>Init 耗时服务与错误诊断</h2>
                   </div>
-                  <div class="kv-list mono">
-                    {inspectData.top_init_services.slice(0, 10).map((s) => (
-                      <div key={`${s.name}-${s.ts_ms}`} class="kv-row">
-                        <span class="k">{s.name} (@{(s.ts_ms / 1000).toFixed(2)}s)</span>
-                        <span class="v">{fmtMs(s.dur_ms)}</span>
-                      </div>
-                    ))}
-                  </div>
-                  <h3>错误 / 异常日志 ({inspectData.errors.length})</h3>
-                  <div class="kv-list mono">
-                    {inspectData.errors.length === 0 ? (
-                      <div class="kv-row"><span class="k">无错误记录</span><span class="v">OK</span></div>
-                    ) : (
-                      inspectData.errors.map((e, idx) => (
-                        <div key={idx} class="kv-row err">
-                          <span class="k">{e.src} {e.text}</span>
-                          <span class="v">{(e.ts_ms / 1000).toFixed(2)}s</span>
+                  <div class="kv-scroll">
+                    <div class="kv-scroll-inner mono">
+                      {inspectData.top_init_services.slice(0, 10).map((s) => (
+                        <div key={`${s.name}-${s.ts_ms}`} class="kv-row">
+                          <span class="k">
+                            {s.name} <span class="muted">@{(s.ts_ms / 1000).toFixed(2)}s</span>
+                          </span>
+                          <span class="v">{fmtMs(s.dur_ms)}</span>
                         </div>
-                      ))
-                    )}
+                      ))}
+                    </div>
                   </div>
+                  <h3>
+                    错误 / 异常日志 (
+                    {inspectData.errors_total != null && inspectData.errors_total > inspectData.errors.length
+                      ? `最近 ${inspectData.errors.length} / 共 ${inspectData.errors_total}`
+                      : inspectData.errors.length}
+                    )
+                  </h3>
+                  {inspectData.errors.length === 0 ? (
+                    <div class="kv-list mono">
+                      <div class="kv-row"><span class="k">无错误记录</span><span class="v">OK</span></div>
+                    </div>
+                  ) : (
+                    <div class="log-scroll">
+                      <div class="log-list mono">
+                        {inspectData.errors.map((e, idx) => (
+                          <div key={idx} class="log-row">
+                            <span class="log-ts">{(e.ts_ms / 1000).toFixed(2)}s</span>
+                            <span class="log-src">{e.src}</span>
+                            <span class="log-msg">{e.text}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </article>
               </section>
             </>
           )}
-        </>
+        </div>
       )}
 
-      {tab === 'compare' && listData && <CompareView runs={listData.runs} />}
+      {listData && visited.compare && (
+        <div class={`tab-pane ${tab === 'compare' ? '' : 'is-hidden'}`}>
+          <CompareView runs={listData.runs} refreshSeq={refreshSeq} />
+        </div>
+      )}
 
-      {tab === 'settings' && listData && (
-        <SettingsView
-          config={listData.config}
-          diskKb={listData.disk_kb}
-          totalRuns={listData.total_runs}
-          onConfigUpdated={handleConfigUpdated}
-          onPruned={() => reloadList()}
-          onStatus={setStatus}
-        />
+      {listData && visited.settings && (
+        <div class={`tab-pane ${tab === 'settings' ? '' : 'is-hidden'}`}>
+          <SettingsView
+            config={listData.config}
+            diskKb={listData.disk_kb}
+            totalRuns={listData.total_runs}
+            onConfigUpdated={handleConfigUpdated}
+            onPruned={() => reloadList()}
+            onStatus={setStatus}
+          />
+        </div>
       )}
     </main>
   );

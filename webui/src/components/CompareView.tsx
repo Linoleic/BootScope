@@ -1,14 +1,25 @@
 import { useEffect, useState } from 'preact/hooks';
 import { fetchCompare } from '../bridge';
-import { fmtDelta, fmtMs, shortRunLabel } from '../format';
+import { fmtDelta, fmtMs } from '../format';
+import { RunSelect } from './RunSelect';
 import type { CompareResponse, RunSummary } from '../types';
 
-export function CompareView({ runs }: { runs: RunSummary[] }) {
+export function CompareView({ runs, refreshSeq = 0 }: { runs: RunSummary[]; refreshSeq?: number }) {
   const [idA, setIdA] = useState<string>(runs[1]?.boot_id || runs[0]?.boot_id || '');
   const [idB, setIdB] = useState<string>(runs[0]?.boot_id || '');
   const [data, setData] = useState<CompareResponse | null>(null);
   const [err, setErr] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (runs.length === 0) return;
+    if (!runs.some((r) => r.boot_id === idB)) {
+      setIdB(runs[0]?.boot_id || '');
+    }
+    if (!runs.some((r) => r.boot_id === idA)) {
+      setIdA(runs[1]?.boot_id || runs[0]?.boot_id || '');
+    }
+  }, [runs]);
 
   useEffect(() => {
     if (!idA || !idB) return;
@@ -18,7 +29,7 @@ export function CompareView({ runs }: { runs: RunSummary[] }) {
       .then((res) => setData(res))
       .catch((e: Error) => setErr(e.message))
       .finally(() => setLoading(false));
-  }, [idA, idB]);
+  }, [idA, idB, refreshSeq]);
 
   if (runs.length < 2) {
     return (
@@ -29,44 +40,38 @@ export function CompareView({ runs }: { runs: RunSummary[] }) {
   }
 
   return (
-    <div style="display:flex;flex-direction:column;gap:12px">
+    <div class="tab-pane">
       <section class="card">
         <div class="card-head">
           <h2>选择对比基准 (A → B)</h2>
-          {loading && <span class="pill mono">计算中…</span>}
+          <span class="pill mono">{loading ? '计算中…' : 'B - A'}</span>
         </div>
         <div class="two-col">
           <div>
             <div class="stat-k" style="margin-bottom:4px">基准记录 A</div>
-            <select class="select mono" value={idA} onChange={(e) => setIdA((e.target as HTMLSelectElement).value)}>
-              {runs.map((r, i) => (
-                <option key={r.boot_id} value={r.boot_id}>
-                  {shortRunLabel(r.boot_id, i, [fmtMs(r.boot_done_ms)])}
-                </option>
-              ))}
-            </select>
+            <RunSelect runs={runs} value={idA} onChange={setIdA} ariaLabel="选择基准记录 A" />
           </div>
           <div>
             <div class="stat-k" style="margin-bottom:4px">目标记录 B</div>
-            <select class="select mono" value={idB} onChange={(e) => setIdB((e.target as HTMLSelectElement).value)}>
-              {runs.map((r, i) => (
-                <option key={r.boot_id} value={r.boot_id}>
-                  {shortRunLabel(r.boot_id, i, [fmtMs(r.boot_done_ms)])}
-                </option>
-              ))}
-            </select>
+            <RunSelect runs={runs} value={idB} onChange={setIdB} ariaLabel="选择目标记录 B" />
           </div>
         </div>
         {err && <p class="status-line err mono">{err}</p>}
       </section>
 
+      {!data && loading && (
+        <section class="card compare-placeholder">
+          <div class="sub mono">正在计算 A / B 对比数据…</div>
+        </section>
+      )}
+
       {data && (
-        <>
+        <div class={`tab-pane compare-results ${loading ? 'is-loading' : ''}`}>
           <section class="summary-grid">
             {[
-              { label: 'BL 硬件耗时 Δ', a: data.run_a.bl_total_ms, b: data.run_b.bl_total_ms },
-              { label: '早期首帧时刻 Δ', a: data.run_a.first_frame_ms, b: data.run_b.first_frame_ms },
-              { label: '系统完成启动 Δ', a: data.run_a.boot_done_ms, b: data.run_b.boot_done_ms },
+              { label: 'BL 耗时 Δ', a: data.run_a.bl_total_ms, b: data.run_b.bl_total_ms },
+              { label: '浮层首帧 Δ', a: data.run_a.first_frame_ms, b: data.run_b.first_frame_ms },
+              { label: '启动完成 Δ', a: data.run_a.boot_done_ms, b: data.run_b.boot_done_ms },
             ].map((item) => {
               const valid = item.a >= 0 && item.b >= 0;
               const d = fmtDelta(item.b - item.a, valid);
@@ -74,7 +79,7 @@ export function CompareView({ runs }: { runs: RunSummary[] }) {
                 <article key={item.label} class="stat-card">
                   <div class="stat-k">{item.label}</div>
                   <div class={`stat-v mono ${d.cls}`}>{d.text}</div>
-                  <div class="stat-s mono">A: {fmtMs(item.a)} · B: {fmtMs(item.b)}</div>
+                  <div class="stat-s mono">{fmtMs(item.a)} → {fmtMs(item.b)}</div>
                 </article>
               );
             })}
@@ -144,7 +149,7 @@ export function CompareView({ runs }: { runs: RunSummary[] }) {
               </div>
             </section>
           )}
-        </>
+        </div>
       )}
     </div>
   );

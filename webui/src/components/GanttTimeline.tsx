@@ -27,8 +27,8 @@ export function GanttTimeline({ run }: { run: InspectResponse }) {
   return (
     <section class="card">
       <div class="card-head">
-        <h2>全链路启动时间轴 (POR → 桌面完成)</h2>
-        <span class="pill mono">{(totalAxis / 1000).toFixed(2)} s</span>
+        <h2>全链路启动时间轴</h2>
+        <span class="pill mono">POR → {(totalAxis / 1000).toFixed(2)}s</span>
       </div>
 
       <div class="svg-wrap">
@@ -120,7 +120,9 @@ export function GanttTimeline({ run }: { run: InspectResponse }) {
               fill="#ff8c7b"
               opacity="0.85"
               style="cursor:pointer"
-              onClick={() => setSelected(`BootScope 浮层 (${run.display.mode}): 首帧 ${(run.display.first_frame_ms / 1000).toFixed(2)}s → 退场 ${(run.display.released_ms / 1000).toFixed(2)}s`)}
+              onClick={() => setSelected(
+                `BootScope 浮层 (${run.display.mode}): 首帧 ${(run.display.first_frame_ms / 1000).toFixed(2)}s → 退场 ${(run.display.released_ms / 1000).toFixed(2)}s${(run.display.self_cpu_ms ?? -1) >= 0 ? ` · 模块自耗 CPU ${run.display.self_cpu_ms}ms${(run.display.self_rss_kb ?? 0) > 0 ? ` · RSS ${(run.display.self_rss_kb! / 1024).toFixed(1)}MB` : ''}${(run.display.frames ?? 0) > 0 ? ` · ${run.display.frames}帧` : ''}` : ''}`,
+              )}
             />
           )}
         </svg>

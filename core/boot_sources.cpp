@@ -154,9 +154,14 @@ void advance_phases_for_framework_tag(
 
 void push_tail(
         EventState* st, int64_t ts_ms, const char* source, TailKind kind,
-        const std::string& raw_text, const std::string& group) {
+        const std::string& raw_text, const std::string& group,
+        const std::string& full_trace_raw) {
     std::string text = sanitize_tail_text(st->rules, raw_text, kTailLineChars - 8);
-    if (text.empty()) return;
+    const std::string& trace_src = full_trace_raw.empty() ? raw_text : full_trace_raw;
+    std::string trace_text = (kind == TailKind::Error || kind == TailKind::ModuleError)
+        ? sanitize_trace_text(st->rules, trace_src, 512)
+        : text;
+    if (text.empty() || trace_text.empty()) return;
 
     const char* kind_str = "INFO";
     if (kind == TailKind::Stage) kind_str = "STAGE";
@@ -168,9 +173,10 @@ void push_tail(
         bool same_msg = (existing.source == source && existing.text == text);
         bool same_err_tag = (!group.empty() && existing.source == source && existing.group == group);
         if (same_msg || same_err_tag) {
-            bool emit_trace = (kind != TailKind::Stage) && (ts_ms - existing.ts_ms >= 2000);
+            bool is_err = (kind == TailKind::Error || kind == TailKind::ModuleError);
+            bool emit_trace = (kind != TailKind::Stage) && ((is_err && !same_msg) || (ts_ms - existing.ts_ms >= 2000));
             if (ts_ms >= existing.ts_ms) {
-                if (emit_trace) trace_tail(ts_ms, source, kind_str, text);
+                if (emit_trace) trace_tail(ts_ms, source, kind_str, trace_text);
                 existing.ts_ms = ts_ms;
                 existing.text = std::move(text);
                 existing.kind = kind;
@@ -183,7 +189,7 @@ void push_tail(
             return;
         }
     }
-    trace_tail(ts_ms, source, kind_str, text);
+    trace_tail(ts_ms, source, kind_str, trace_text);
     TailEntry entry;
     entry.ts_ms = ts_ms;
     entry.seq = st->next_seq++;
@@ -389,7 +395,7 @@ static void process_kmsg_record(EventState* st, const char* rec) {
                     push_tail(st, ts_ms, is_self ? "M" : "E",
                               is_self ? TailKind::ModuleError : TailKind::Error,
                               (is_self ? "ERR CMD " : "CMD FAIL ") + short_cmd,
-                              is_self ? "MOD:CMD" : "");
+                              is_self ? "MOD:CMD" : "", body);
                 } else {
                     const char* took_p = strstr(body, "took ");
                     int took_ms = 0;
@@ -564,14 +570,14 @@ void* err_reader_thread(void* arg) {
 
         FILE* fp = fdopen(pipefd[0], "r");
         if (fp) {
-            char line[512];
+            char line[1024];
             while (!st->stop && fgets(line, sizeof(line), fp)) {
                 double sec = 0.0;
                 int lpid = 0, ltid = 0;
                 char lvl = 0;
-                char tag[64]{};
+                char tag[96]{};
                 int tag_end = 0;
-                if (sscanf(line, " %lf %d %d %c %63[^:]:%n", &sec, &lpid, &ltid, &lvl, tag, &tag_end) == 5
+                if (sscanf(line, " %lf %d %d %c %95[^:]:%n", &sec, &lpid, &ltid, &lvl, tag, &tag_end) == 5
                         && tag_end > 0) {
                     const char* msg = line + tag_end;
                     if (is_stack_trace_noise(msg)) continue;

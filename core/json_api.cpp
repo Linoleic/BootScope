@@ -112,6 +112,9 @@ std::vector<InitSvcTiming> extract_init_service_timings(const ReplayData& rd) {
     std::vector<InitSvcTiming> out;
     for (const auto& ev : rd.init_events) {
         if (ev.kind != "exit") continue;
+        if (ev.name == "bootscope_early" || ev.name == "bootscope" || ev.name == "bootanim") {
+            continue;
+        }
         const char* tp = strstr(ev.detail.c_str(), "took=");
         if (!tp) continue;
         double took_s = atof(tp + 5);
@@ -216,7 +219,7 @@ int64_t count_trace_errors(const std::string& path) {
     FILE* f = fopen(path.c_str(), "r");
     if (!f) return 0;
     int64_t cnt = 0;
-    char line[512];
+    char line[2048];
     while (fgets(line, sizeof(line), f)) {
         if (strstr(line, "\tTAIL\t") != nullptr &&
                 (strstr(line, "\tERR\t") != nullptr || strstr(line, "\tMERR\t") != nullptr)) {
@@ -305,13 +308,17 @@ int cmd_inspect_json(const std::string& target) {
     printf("},");
 
     printf("\"display\":{\"mode\":\"%s\",\"started_ms\":%lld,\"first_frame_ms\":%lld,"
-           "\"released_ms\":%lld,\"layout\":\"%s\",\"exit\":\"%s\"},",
+           "\"released_ms\":%lld,\"layout\":\"%s\",\"exit\":\"%s\","
+           "\"self_cpu_ms\":%lld,\"self_rss_kb\":%lld,\"frames\":%lld},",
            json_escape(map_get(b.dstat, "mode", "probe")).c_str(),
            (long long)map_get_i64(b.drend, "started_ms", -1),
            (long long)map_get_i64(b.drend, "first_frame_submitted_ms", -1),
            (long long)map_get_i64(b.drend, "released_ms", -1),
            json_escape(map_get(b.drend, "layout")).c_str(),
-           json_escape(map_get(b.drend, "exit")).c_str());
+           json_escape(map_get(b.drend, "exit")).c_str(),
+           (long long)map_get_i64(b.drend, "self_cpu_ms", -1),
+           (long long)map_get_i64(b.drend, "self_rss_kb", -1),
+           (long long)map_get_i64(b.drend, "frames", -1));
 
     const BootloaderProfile& bp = b.rd.bl_profile;
     printf("\"bootloader\":{\"source\":\"%s\",\"summary\":\"%s\",\"meta\":\"%s\","
@@ -437,8 +444,8 @@ int cmd_inspect_json(const std::string& target) {
             if (te.kind == TailKind::Error || te.kind == TailKind::ModuleError) errs.push_back(te);
         }
     }
-    printf("\"errors\":[");
-    size_t err_start = errs.size() > 40 ? (errs.size() - 40) : 0;
+    printf("\"errors_total\":%zu,\"errors\":[", errs.size());
+    size_t err_start = errs.size() > 2000 ? (errs.size() - 2000) : 0;
     for (size_t i = err_start; i < errs.size(); i++) {
         if (i > err_start) putchar(',');
         const char* kstr = (errs[i].kind == TailKind::ModuleError) ? "MERR" : "ERR";

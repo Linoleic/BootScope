@@ -144,6 +144,9 @@ const MOCK_INSPECT: InspectResponse = {
     released_ms: 21500,
     layout: '1440x3120@120',
     exit: 'animation_ended',
+    self_cpu_ms: 142,
+    self_rss_kb: 6144,
+    frames: 74,
   },
   bootloader: {
     source: 'UEFILOG',
