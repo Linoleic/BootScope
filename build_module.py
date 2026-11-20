@@ -198,7 +198,6 @@ def main() -> None:
     module_dir = root / 'module'
     prop_path = module_dir / 'module.prop'
     build_info = resolve_build_info(root, prop_path)
-    version = build_info['release_version']
     read_module_version(prop_path)
 
     sdk = resolve_sdk_path(args.sdk)
@@ -207,8 +206,11 @@ def main() -> None:
     webroot_dir = build_webui(root, skip=args.skip_webui)
     print(webroot_dir)
 
-    output = root / 'dist' / f'bootscope-{version}.zip'
-    output.parent.mkdir(parents=True, exist_ok=True)
+    dist_dir = root / 'dist'
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    for stale_zip in dist_dir.glob('bootscope-*.zip'):
+        stale_zip.unlink()
+    output = dist_dir / f"bootscope-{build_info['package_version']}.zip"
 
     text_entries = [
         ('action.sh', 0o100755),

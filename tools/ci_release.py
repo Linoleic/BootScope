@@ -48,8 +48,12 @@ def prepare(root: Path, tag: str, output: Path) -> dict[str, str]:
     upd = json.loads((root / 'update.json').read_text(encoding='utf-8'))
     if upd.get('version') != version or str(upd.get('versionCode')) != version_code:
         raise ValueError('update.json version/versionCode mismatch with module.prop')
-    if not str(upd.get('zipUrl', '')).endswith(f'/bootscope-{version}.zip'):
-        raise ValueError('update.json zipUrl mismatch')
+    expected_zip_re = (
+        r'^https://github\.com/Linoleic/BootScope/releases/download/'
+        + re.escape(version) + r'/bootscope-' + re.escape(version) + r'-r[1-9]\d*\.zip$'
+    )
+    if not re.fullmatch(expected_zip_re, str(upd.get('zipUrl', ''))):
+        raise ValueError('update.json zipUrl must match bootscope-vMAJOR.MINOR.PATCH-rN.zip')
     if not str(upd.get('changelog', '')).endswith('/CHANGELOG.md'):
         raise ValueError('update.json changelog URL must point to CHANGELOG.md')
 
@@ -62,7 +66,7 @@ def prepare(root: Path, tag: str, output: Path) -> dict[str, str]:
     return prop
 
 
-def verify_package(package: Path, prop: dict[str, str], revision: str) -> None:
+def verify_package(package: Path, prop: dict[str, str], revision: str, tag: str = '', root: Path | None = None) -> None:
     with zipfile.ZipFile(package) as z:
         names = z.namelist()
         if len({name.casefold() for name in names}) != len(names):
@@ -75,13 +79,18 @@ def verify_package(package: Path, prop: dict[str, str], revision: str) -> None:
             raise ValueError('ZIP CRC failure')
 
         packed = properties(z.read('module.prop').decode('utf-8'))
+        packed_ver = packed.get('version', '')
         if (
             packed.get('versionCode') != prop['versionCode']
-            or not re.fullmatch(re.escape(prop['version']) + r'-r[1-9]\d*', packed.get('version', ''))
+            or not re.fullmatch(re.escape(prop['version']) + r'-r[1-9]\d*', packed_ver)
         ):
             raise ValueError('Package version mismatch or dirty build')
-        if package.name != f"bootscope-{prop['version']}.zip":
-            raise ValueError('Unexpected package filename')
+        if package.name != f"bootscope-{packed_ver}.zip":
+            raise ValueError(f"Unexpected package filename {package.name}; expected bootscope-{packed_ver}.zip")
+        if tag and root is not None:
+            upd = json.loads((root / 'update.json').read_text(encoding='utf-8'))
+            if not str(upd.get('zipUrl', '')).endswith(f'/{package.name}'):
+                raise ValueError(f"update.json zipUrl {upd.get('zipUrl')} does not end with /{package.name}")
 
         binary = z.read('bootscope')
         if binary[:6] != b'\x7fELF\x02\x01' or struct.unpack_from('<H', binary, 18)[0] != 183:
@@ -114,7 +123,7 @@ def main() -> None:
     if args.package:
         if not re.fullmatch(r'[a-f0-9]{40}', args.revision):
             parser.error('--package requires a full --revision')
-        verify_package(args.package, prop, args.revision)
+        verify_package(args.package, prop, args.revision, tag=args.tag, root=root)
     print(f"Validated {prop['version']} ({prop['versionCode']})")
 
 

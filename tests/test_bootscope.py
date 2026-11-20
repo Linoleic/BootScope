@@ -469,6 +469,7 @@ class PackagingAndModuleTests(unittest.TestCase):
         self.assertIn('chart-samples', web_css)
 
     def test_build_module_ndk_resolution(self):
+        from unittest import mock
         with tempfile.TemporaryDirectory() as tmp:
             sdk = Path(tmp)
             clang_name = 'aarch64-linux-android33-clang++' + ('.cmd' if build_module.os.name == 'nt' else '')
@@ -476,10 +477,15 @@ class PackagingAndModuleTests(unittest.TestCase):
                 clang = sdk / 'ndk' / ver / 'toolchains' / 'llvm' / 'prebuilt' / 'host-x86_64' / 'bin' / clang_name
                 clang.parent.mkdir(parents=True)
                 clang.write_bytes(b'')
-            resolved = build_module.resolve_ndk(sdk, None)
+            clean_env = {k: v for k, v in build_module.os.environ.items() if k not in ('ANDROID_NDK_HOME', 'ANDROID_NDK_ROOT')}
+            with mock.patch.dict(build_module.os.environ, clean_env, clear=True):
+                resolved = build_module.resolve_ndk(sdk, None)
             self.assertEqual(resolved.name, '26.3.11579264')
             clang_path, _ = build_module.resolve_ndk_clang(resolved)
             self.assertTrue(clang_path.is_file())
+            with mock.patch.dict(build_module.os.environ, {'ANDROID_NDK_HOME': str(sdk / 'ndk' / '25.2.9519653')}):
+                overridden = build_module.resolve_ndk(sdk, None)
+            self.assertEqual(overridden.name, '25.2.9519653')
 
     def test_unified_module_scripts_structure(self):
         service_sh = (ROOT / 'module' / 'service.sh').read_text(encoding='utf-8')
@@ -524,8 +530,10 @@ class PackagingAndModuleTests(unittest.TestCase):
         if (ROOT / 'dist' / 'webroot' / 'index.html').is_file():
             cmd.append('--skip-webui')
         subprocess.run(cmd, check=True)
-        version = package_utils.read_module_version(ROOT / 'module' / 'module.prop')
-        archive_path = ROOT / 'dist' / f'bootscope-{version}.zip'
+        prop_path = ROOT / 'module' / 'module.prop'
+        version = package_utils.read_module_version(prop_path)
+        build_info = build_module.resolve_build_info(ROOT, prop_path)
+        archive_path = ROOT / 'dist' / f"bootscope-{build_info['package_version']}.zip"
         self.assertTrue(archive_path.is_file())
         with ZipFile(archive_path, 'r') as archive:
             names = set(archive.namelist())
@@ -585,7 +593,10 @@ class PackagingAndModuleTests(unittest.TestCase):
         upd = json.loads((ROOT / 'update.json').read_text(encoding='utf-8'))
         self.assertEqual(upd['version'], props['version'])
         self.assertEqual(str(upd['versionCode']), props['versionCode'])
-        self.assertTrue(upd['zipUrl'].endswith(f"/bootscope-{props['version']}.zip"))
+        self.assertRegex(
+            upd['zipUrl'],
+            r'/releases/download/' + re.escape(props['version']) + r'/bootscope-' + re.escape(props['version']) + r'-r[1-9]\d*\.zip$',
+        )
         self.assertTrue(upd['changelog'].endswith('/CHANGELOG.md'))
 
         spec = importlib.util.spec_from_file_location('ci_release', ROOT / 'tools' / 'ci_release.py')

@@ -21,7 +21,7 @@ This guide explains how to build BootScope from source, run the automated test s
 Release versions and package build identities are maintained separately:
 
 - **Release Metadata**: [module/module.prop](module/module.prop) explicitly defines `version=vMAJOR.MINOR.PATCH` and a positive integer `versionCode` (recommended mapping: `MAJOR * 10000 + MINOR * 100 + PATCH`, e.g., `v0.5.0` -> `500`). **Commit counts never drive `versionCode`**, preventing shallow clones or history rewrites from downgrading upgrade codes.
-- **Packaged Display Version**: `build_module.py` queries Git history and stages `version=vMAJOR.MINOR.PATCH-r<commit_count>` (`-local` appended when the working tree has uncommitted edits) inside the generated ZIP's `module.prop`, leaving tracked [module/module.prop](module/module.prop) untouched.
+- **Packaged Display Version**: `build_module.py` queries Git history to compute `vMAJOR.MINOR.PATCH-r<commit_count>` (`-local` when uncommitted edits exist), using it for both the packaged `module.prop` and output archive name (`bootscope-v0.5.0-r33.zip`), while leaving tracked [module/module.prop](module/module.prop) untouched.
 - **Embedded Build Identity**: Compilation generates `dist/build-info/bootscope_build_info.h` and embeds the package version plus 40-character Git revision inside the stripped `bootscope` ELF binary. Run `bootscope version` (or `--version`) on-device to inspect exact build provenance.
 - **License Bundling**: Per GPL-3.0 binary distribution requirements, [LICENSE](LICENSE) is automatically packaged into the root of `dist/bootscope-v*.zip`.
 
@@ -40,7 +40,7 @@ python build_module.py --skip-webui
 python -m unittest discover -s tests -v
 
 # 4. Run the same strict package integrity check used by Release CI
-python tools/ci_release.py --tag v0.5.0 --package dist/bootscope-v0.5.0.zip --revision <40-char-sha>
+python tools/ci_release.py --tag v0.5.0 --package dist/bootscope-v0.5.0-r<N>.zip --revision <40-char-sha>
 ```
 
 ### Host Offline Analysis CLI

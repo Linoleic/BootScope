@@ -21,7 +21,7 @@
 发布版本与构建身份分开维护：
 
 - **发布版本**：在 [module/module.prop](module/module.prop) 中显式维护 `version=vMAJOR.MINOR.PATCH` 与正整数 `versionCode`（推荐按 `MAJOR * 10000 + MINOR * 100 + PATCH` 递增，例如 `v0.5.0` 对应 `500`）。**提交次数不再用于计算 `versionCode`**，避免浅克隆或历史整理导致升级码倒退。
-- **包内可读版本**：构建脚本通过 `resolve_build_info()` 读取 Git 提交数与工作区状态，生成 `vMAJOR.MINOR.PATCH-r<Git提交数>`（存在未提交修改时追加 `-local`）写入打包 ZIP 内的 `module.prop`，同时严格保持仓库源码中的 [module/module.prop](module/module.prop) 不被修改。
+- **包内可读版本**：构建脚本通过 `resolve_build_info()` 读取 Git 提交数与工作区状态，生成 `vMAJOR.MINOR.PATCH-r<Git提交数>`（存在未提交修改时追加 `-local`）写入打包 ZIP 内的 `module.prop` 与输出文件名（如 `bootscope-v0.5.0-r33.zip`），同时严格保持仓库源码中的 [module/module.prop](module/module.prop) 不被修改。
 - **二进制构建标识**：构建期在 `dist/build-info/bootscope_build_info.h` 生成提交哈希与包版本信息并内嵌至 `bootscope` 二进制；在设备上运行 `bootscope version`（或 `--version`）即可查看精确构建号与完整 Commit SHA。
 - **许可证随包附带**：根据 GPL-3.0 要求，打包时会自动把仓库根目录 [LICENSE](LICENSE) 一并打入模块 ZIP。
 
@@ -40,7 +40,7 @@ python build_module.py --skip-webui
 python -m unittest discover -s tests -v
 
 # 4. 运行与 CI 相同的发布前完整性体检
-python tools/ci_release.py --tag v0.5.0 --package dist/bootscope-v0.5.0.zip --revision <40位完整CommitSHA>
+python tools/ci_release.py --tag v0.5.0 --package dist/bootscope-v0.5.0-r<N>.zip --revision <40位完整CommitSHA>
 ```
 
 ### PC 离线分析工具
